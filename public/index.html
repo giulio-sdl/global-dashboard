@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Global Markets</title>
+  <link rel="stylesheet" href="styles.css">
+  <script>
+    // Apply a saved theme before first paint.
+    try {
+      const t = localStorage.getItem('theme');
+      if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+    } catch {}
+  </script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <h1><span>Global Markets</span></h1>
+      <div class="flag" aria-hidden="true"></div>
+    </div>
+    <div class="controls">
+      <span id="updated" class="updated" role="status" data-state="loading"><i class="live"></i><span>Loading…</span></span>
+      <label class="control">
+        <span class="sr-only">Auto-refresh interval</span>
+        <select id="interval">
+          <option value="15000">Refresh 15s</option>
+          <option value="30000" selected>Refresh 30s</option>
+          <option value="60000">Refresh 60s</option>
+          <option value="0">Paused</option>
+        </select>
+      </label>
+      <button id="refresh" type="button" class="control">Refresh now</button>
+      <button id="theme" type="button" class="control">Theme: auto</button>
+    </div>
+  </header>
+
+  <!-- Stays in view while scrolling: where you are, and the period every figure is measured over. -->
+  <nav class="bar" aria-label="Sections and period">
+    <div class="tabs">
+      <a href="#overview" aria-current="true">Overview</a>
+      <a href="#equities">Indexes</a>
+      <a href="#crypto">Crypto</a>
+      <a href="#bonds">Bonds</a>
+      <a href="#commodities">Commodities</a>
+      <a href="#fx">Currencies</a>
+    </div>
+    <div class="filters">
+      <span class="filters-label" id="modes-label">Change over</span>
+      <div id="modes" class="ranges" role="group" aria-labelledby="modes-label"></div>
+    </div>
+  </nav>
+
+  <div id="banner" class="banner" role="alert" hidden></div>
+
+  <main id="main">
+    <section id="overview">
+      <h2>At a glance</h2>
+      <div id="tiles" class="tiles"></div>
+    </section>
+  </main>
+
+  <footer class="notes">
+    <p>
+      Click any row or tile for its chart and key figures; indexes also show the constituents that moved them, where weights are available.
+      Cash indexes do not trade outside their session. While an exchange is shut, "Since close" shows how far a
+      future or US-listed ETF on the same market has moved since the closing bell, as a guide to where the index
+      would stand now. ETFs are priced in US dollars, so that figure includes currency moves, and it stays empty
+      until the future or ETF has traded after the close.
+    </p>
+    <p>
+      Quotes: CNBC public feed. US cash indexes, ETFs, currencies and crypto are real-time; other indexes, futures and commodities
+      are delayed by roughly 10–20 minutes. Hover a trend line for its values; times are in your local time.
+      Session status follows regular exchange hours and does not know about half-days.
+    </p>
+    <p>
+      Short term shows the change over 1 day, 5 days, 1 month and 3 months, with a 3-month trend line; long term
+      shows 6 months, 1 year, 5 years and 10 years, with a 10-year line (or as much history as there is). Five days
+      is measured from the close five sessions before the latest one; longer periods from the last close on or
+      before the same date that long ago (the last weekly close for 5 and 10 years). The 52-week range comes from a
+      year of daily highs and lows. Futures use the continuous front-month contract, so their long-period changes
+      include contract rolls. A dash means the feed's history does not reach back that far.
+      Treasury yields are in percent and their moves in basis points (1 bp = 0.01 of a percentage point);
+      bond indexes are shown through the ETFs that track them.
+    </p>
+  </footer>
+
+  <dialog id="detail" class="detail" aria-labelledby="detail-title">
+    <header class="d-head">
+      <div>
+        <h2 id="detail-title"></h2>
+        <p class="d-sub"></p>
+        <p class="d-quote"><span class="dq-last"></span> <span class="dq-chg"></span> <span class="dq-time"></span></p>
+      </div>
+      <button type="button" class="control" id="detail-close">Close</button>
+    </header>
+    <div class="d-overview">
+      <dl class="d-stats"></dl>
+      <div class="d-tach"></div>
+    </div>
+    <dl class="d-perf" aria-label="Change over each period"></dl>
+    <figure class="d-chart">
+      <div class="d-chart-head">
+        <figcaption></figcaption>
+        <div id="chart-periods" class="ranges" role="group" aria-label="Chart period"></div>
+      </div>
+      <div class="d-plot"><span class="d-hi"></span><span class="d-lo"></span></div>
+      <div class="d-axis"><span class="d-from"></span><span class="d-to"></span></div>
+    </figure>
+    <div id="d-constituents"></div>
+  </dialog>
+
+  <div id="tip" class="tip" hidden></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

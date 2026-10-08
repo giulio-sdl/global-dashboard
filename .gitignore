@@ -1,0 +1,5 @@
+node_modules/
+*.log
+.DS_Store
+# The morning-open schedule holds paths specific to one Mac.
+scripts/*.plist

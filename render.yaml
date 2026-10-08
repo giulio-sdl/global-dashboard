@@ -1,0 +1,12 @@
+# Lets Render (render.com) host the dashboard straight from this repository:
+# New > Blueprint, pick the repository, and it reads this file.
+services:
+  - type: web
+    name: global-dashboard
+    runtime: node
+    plan: free
+    buildCommand: "true" # nothing to install or build
+    startCommand: node server.js
+    envVars:
+      - key: HOST
+        value: 0.0.0.0

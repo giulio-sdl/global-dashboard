@@ -1,0 +1,13 @@
+{
+  "name": "global-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Live dashboard of global equity indexes, pre/post-market quotes and commodities",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
