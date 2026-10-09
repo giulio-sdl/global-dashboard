@@ -118,7 +118,9 @@ quoted by the feed, which leaves about 4% of the STOXX Europe 600 by weight with
 Two quirks of the feed are handled in [server.js](server.js). Shortly before an exchange opens it clears the
 day's figures (change reads 0.00); until trading starts the dashboard shows the last session's change instead,
 taken from the daily closes. And it is sometimes slow, most of all around the US open, so a refresh that takes
-more than 2.5 seconds returns the previous figures while it finishes in the background.
+more than 2.5 seconds returns the previous figures while it finishes in the background. A history load that
+comes back incomplete (the 07:30 job can start the server before the network is up after the Mac wakes) is
+retried after 20 seconds rather than kept for its usual cache time.
 
 Not available from this feed: CSI 300 and BSE Sensex, non-US index
 futures other than Nikkei, the 52-week low for several commodity contracts, and direct quotes for the

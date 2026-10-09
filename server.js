@@ -52,6 +52,12 @@ async function fetchJson(url, timeoutMs = 12_000) {
   return res.json();
 }
 
+// Marks a result as missing some of its symbols, without the mark showing up
+// among its entries.
+const INCOMPLETE = Symbol('incomplete');
+const markIncomplete = (results) => Object.defineProperty(results, INCOMPLETE, { value: true });
+const RETRY_INCOMPLETE_MS = 20_000;
+
 // Serves a cached value while fresh, shares one in-flight refresh between
 // callers, and falls back to the last good value when the provider fails.
 // The provider is sometimes slow (most of all around the US open), so once
@@ -63,8 +69,14 @@ function cached(ttlMs, load, patienceMs = 2_500) {
   let pending = null;
   return async () => {
     if (value && Date.now() - at < ttlMs) return { value, at, error: null };
+//
+// A load can come back incomplete (see forEachSymbol): some symbols failed,
+// typically because the network was not up yet when the computer woke. Such a
+// result is topped up with what was known before and counts as fresh for only
+// `RETRY_INCOMPLETE_MS`, so the gaps are filled on the next request instead of
+// lasting the whole cache time.
     pending ??= load()
-      .then((v) => { value = v; at = Date.now(); return null; })
+      .then((v) => { keep(v); return null; })
       .catch((err) => err.message || String(err))
       .finally(() => { pending = null; });
     const slow = new Promise((resolve) => setTimeout(resolve, patienceMs, null));
@@ -73,6 +85,11 @@ function cached(ttlMs, load, patienceMs = 2_500) {
     return { value, at, error };
   };
 }
+  const keep = (loaded) => {
+    const incomplete = Boolean(loaded?.[INCOMPLETE]);
+    value = incomplete && value ? markIncomplete({ ...value, ...loaded }) : loaded;
+    at = incomplete ? Date.now() - ttlMs + RETRY_INCOMPLETE_MS : Date.now();
+  };
 
 // ---- quotes ---------------------------------------------------------------
 
@@ -399,21 +416,27 @@ async function loadSpark(symbol) {
 // Runs `load` for every symbol, a few at a time, and keeps what succeeds.
 async function forEachSymbol(load, symbols = SYMBOLS, concurrency = SPARK_CONCURRENCY) {
   const results = {};
-  const queue = [...symbols];
-  let failures = 0;
-  await Promise.all(Array.from({ length: concurrency }, async () => {
-    for (let symbol; (symbol = queue.shift()); ) {
-      try {
-        const result = await load(symbol);
-        if (result) results[symbol] = result;
-      } catch {
-        failures++;
+  const run = async (list) => {
+    const queue = [...list];
+    const failed = [];
+    await Promise.all(Array.from({ length: concurrency }, async () => {
+      for (let symbol; (symbol = queue.shift()); ) {
+        try {
+          const result = await load(symbol);
+          if (result) results[symbol] = result;
+        } catch {
+          failed.push(symbol);
+        }
       }
-    }
-  }));
-  if (failures === symbols.length) throw new Error('chart feed unavailable');
-  return results;
+    }));
+    return failed;
+  };
+  const failed = await run(await run(symbols));
+  if (symbols.length && failed.length === symbols.length) throw new Error('chart feed unavailable');
+  return failed.length ? markIncomplete(results) : results;
 }
+// Symbols that fail get one more try; if any still fail the result is marked
+// incomplete, so it is not mistaken for the full picture.
 
 const getProxyBars = cached(SPARK_TTL_MS, () => forEachSymbol((symbol) => loadBars(symbol, '10M', PROXY_DAYS_BACK), PROXY_SYMBOLS));
 
@@ -520,7 +543,8 @@ async function loadBases() {
       if (reference) bases[range][symbol] = reference[1];
     }
   }
-  return { value: bases, at: Math.min(daily.at, weekly.at), error: daily.error || weekly.error };
+  const incomplete = Boolean(daily.value[INCOMPLETE] || weekly.value[INCOMPLETE]);
+  return { value: bases, at: Math.min(daily.at, weekly.at), error: daily.error || weekly.error, incomplete };
 }
 
 // Fetches every period's history once at start-up, one bar size at a time, so
@@ -546,8 +570,8 @@ function sendJson(res, status, body) {
 
 async function sendData(res, key, get) {
   try {
-    const { value, at, error } = await get();
-    sendJson(res, 200, { [key]: value, fetchedAt: at, error });
+    const { value, at, error, incomplete } = await get();
+    sendJson(res, 200, { [key]: value, fetchedAt: at, error, incomplete: incomplete || Boolean(value?.[INCOMPLETE]) });
   } catch (err) {
     sendJson(res, 502, { error: err.message });
   }
