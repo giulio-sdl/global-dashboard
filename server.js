@@ -52,19 +52,36 @@ async function fetchJson(url, timeoutMs = 12_000) {
   return res.json();
 }
 
+// Marks a result as missing some of its symbols, without the mark showing up
+// among its entries.
+const INCOMPLETE = Symbol('incomplete');
+const markIncomplete = (results) => Object.defineProperty(results, INCOMPLETE, { value: true });
+const RETRY_INCOMPLETE_MS = 20_000;
+
 // Serves a cached value while fresh, shares one in-flight refresh between
 // callers, and falls back to the last good value when the provider fails.
 // The provider is sometimes slow (most of all around the US open), so once
 // there is a value a caller waits only `patienceMs` for the refresh: after
 // that it gets the previous value, and the refresh finishes in the background.
+//
+// A load can come back incomplete (see forEachSymbol): some symbols failed,
+// typically because the network was not up yet when the computer woke. Such a
+// result is topped up with what was known before and counts as fresh for only
+// `RETRY_INCOMPLETE_MS`, so the gaps are filled on the next request instead of
+// lasting the whole cache time.
 function cached(ttlMs, load, patienceMs = 2_500) {
   let value = null;
   let at = 0;
   let pending = null;
+  const keep = (loaded) => {
+    const incomplete = Boolean(loaded?.[INCOMPLETE]);
+    value = incomplete && value ? markIncomplete({ ...value, ...loaded }) : loaded;
+    at = incomplete ? Date.now() - ttlMs + RETRY_INCOMPLETE_MS : Date.now();
+  };
   return async () => {
     if (value && Date.now() - at < ttlMs) return { value, at, error: null };
     pending ??= load()
-      .then((v) => { value = v; at = Date.now(); return null; })
+      .then((v) => { keep(v); return null; })
       .catch((err) => err.message || String(err))
       .finally(() => { pending = null; });
     const slow = new Promise((resolve) => setTimeout(resolve, patienceMs, null));
@@ -87,18 +104,24 @@ function num(text) {
 
 const positive = (text) => { const n = num(text); return n > 0 ? n : null; };
 
-function decimals(text, value) {
-  // Yields arrive as "5.352%"; the sign is not a decimal place.
-  const dp = (String(text).replace('%', '').split('.')[1] || '').length;
-  return Math.min(dp, Math.abs(value) >= 1000 ? 2 : 4);
-}
+// Yields arrive as "5.352%"; the sign is not a decimal place.
+const places = (text) => (String(text).replace('%', '').split('.')[1] || '').length;
+
+const decimals = (text, value) => Math.min(places(text), Math.abs(value) >= 1000 ? 2 : 4);
 
 // The feed's own percentage is preferred: for low-priced instruments (XRP at
-// 1.48) the rounded price and change are too coarse to derive it from.
+// 1.48) the rounded price and change are too coarse to derive it from. But
+// for some indexes the feed rounds it to one decimal (-2.70% for a fall of
+// 2.76%), so where it is further from the derived figure than the rounding
+// of the change can explain, the derived figure is used.
 function change(last, changeText, pctText) {
   const delta = num(changeText) ?? 0;
   const prev = last - delta;
-  return { change: delta, prevClose: prev, changePct: num(pctText) ?? (prev ? (delta / prev) * 100 : null) };
+  const derived = prev ? (delta / prev) * 100 : null;
+  const stated = num(pctText);
+  const doubt = prev ? ((0.5 * 10 ** -places(changeText)) / Math.abs(prev)) * 100 : Infinity;
+  const coarse = stated != null && derived != null && Math.abs(stated - derived) > doubt + 0.006;
+  return { change: delta, prevClose: prev, changePct: stated == null || coarse ? derived : stated };
 }
 
 function normalizeQuote(raw) {
@@ -266,24 +289,22 @@ const pricedOf = keyed(CONSTITUENT_TTL_MS, async (item) => {
   };
 });
 
-// Each constituent's close at the start of a period, measured the same way
-// as the index's own change: five sessions back, or the last close on or
-// before the same date that long ago. One small request per constituent.
+// Each constituent's close at the start of a period: its last close on or
+// before the day the index's own change is measured from, so that the two
+// cover the same stretch. One small request per constituent.
 const referencesOf = keyed(REFERENCE_TTL_MS, async (item, range) => {
   const spec = RANGES[range];
-  const { value: priced } = await pricedOf(item.symbol, item);
-  const sessions = new Map(priced.rows.filter((row) => row.quote).map((row) => [row.symbol, row.quote.date]));
-  const today = new Date().toISOString().slice(0, 10);
+  const [{ value: priced }, daily] = await Promise.all([pricedOf(item.symbol, item), HISTORY.day.get().catch(() => null)]);
+  const session = sessionOf(lastQuotes[item.symbol], daily?.value[item.symbol]);
+  const start = spec.sessions
+    // Without the index's history, five sessions are taken to be a week.
+    ? session.closed.at(-spec.sessions)?.[0] ?? Date.parse(session.date) - 7 * DAY_MS
+    : Date.parse(monthsBefore(session.date, spec.months));
+  const target = barDate([start]);
   return forEachSymbol(async (symbol) => {
-    const session = sessions.get(symbol) ?? today;
-    if (spec.sessions) {
-      const bars = await loadBarsBetween(symbol, '1D', Date.now() - 16 * DAY_MS, Date.now() + DAY_MS);
-      return bars.filter((bar) => barDate(bar) < session).at(-spec.sessions)?.[1];
-    }
-    const target = monthsBefore(session, spec.months);
-    const bars = await loadBarsBetween(symbol, '1D', Date.parse(target) - 12 * DAY_MS, Date.parse(target) + 2 * DAY_MS);
+    const bars = await loadBarsBetween(symbol, '1D', start - 12 * DAY_MS, start + 2 * DAY_MS);
     return bars.filter((bar) => barDate(bar) <= target).at(-1)?.[1];
-  }, [...sessions.keys()], REFERENCE_CONCURRENCY);
+  }, priced.rows.filter((row) => row.quote).map((row) => row.symbol), REFERENCE_CONCURRENCY);
 });
 
 // How many times over a share price can believably have multiplied in each
@@ -397,22 +418,28 @@ async function loadSpark(symbol) {
 }
 
 // Runs `load` for every symbol, a few at a time, and keeps what succeeds.
+// Symbols that fail get one more try; if any still fail the result is marked
+// incomplete, so it is not mistaken for the full picture.
 async function forEachSymbol(load, symbols = SYMBOLS, concurrency = SPARK_CONCURRENCY) {
   const results = {};
-  const queue = [...symbols];
-  let failures = 0;
-  await Promise.all(Array.from({ length: concurrency }, async () => {
-    for (let symbol; (symbol = queue.shift()); ) {
-      try {
-        const result = await load(symbol);
-        if (result) results[symbol] = result;
-      } catch {
-        failures++;
+  const run = async (list) => {
+    const queue = [...list];
+    const failed = [];
+    await Promise.all(Array.from({ length: concurrency }, async () => {
+      for (let symbol; (symbol = queue.shift()); ) {
+        try {
+          const result = await load(symbol);
+          if (result) results[symbol] = result;
+        } catch {
+          failed.push(symbol);
+        }
       }
-    }
-  }));
-  if (failures === symbols.length) throw new Error('chart feed unavailable');
-  return results;
+    }));
+    return failed;
+  };
+  const failed = await run(await run(symbols));
+  if (symbols.length && failed.length === symbols.length) throw new Error('chart feed unavailable');
+  return failed.length ? markIncomplete(results) : results;
 }
 
 const getProxyBars = cached(SPARK_TTL_MS, () => forEachSymbol((symbol) => loadBars(symbol, '10M', PROXY_DAYS_BACK), PROXY_SYMBOLS));
@@ -434,7 +461,7 @@ for (const source of Object.values(HISTORY)) {
 }
 
 // Every period is measured from a closing level, counted back from the
-// instrument's latest session (the date of its last quote):
+// instrument's latest session (see sessionOf):
 //   5 days          the close five sessions earlier
 //   months, years   the last close on or before the same date that long ago
 // `chart` is the bar size of the line drawn since then.
@@ -467,31 +494,64 @@ function monthsBefore(date, months) {
   return first.toISOString().slice(0, 10);
 }
 
+// The day after a date, skipping the weekend.
+function nextWeekday(date) {
+  const day = new Date(`${date}T00:00:00Z`);
+  do day.setUTCDate(day.getUTCDate() + 1); while (day.getUTCDay() % 6 === 0);
+  return day.toISOString().slice(0, 10);
+}
+
+// The session a quote's figures belong to: its date, and the daily bars that
+// closed before it. The date on the quote does not say. The feed dates the
+// closing quote of a US-listed fund a day early, dates a future by the
+// calendar day of its last trade, and moves on to today before a market has
+// opened. What the quote does state is the close its change is measured from,
+// so that close is looked for among the latest daily bars. Where it is not
+// there (a future settles away from its last trade), or two bars in a row
+// carry it (nothing moved, a holiday), the dates decide instead.
+function sessionOf(quote, daily = []) {
+  // A quote the feed has cleared ahead of the open is read as it is shown: as its last session.
+  const q = quote && awaitingOpen(quote) ? { ...quote } : quote;
+  if (q !== quote) restoreLastSession(q, daily);
+  const quoted = q?.date ?? new Date().toISOString().slice(0, 10);
+  const stated = q && !awaitingOpen(q) ? q.prevClose : null;
+  const matches = (bar) => bar && stated != null && Math.abs(bar[1] - stated) <= 0.75 * 10 ** -q.dp;
+  for (let i = daily.length - 1; i >= Math.max(0, daily.length - 3); i--) {
+    if (!matches(daily[i])) continue;
+    if (matches(daily[i - 1])) break;
+    const before = barDate(daily[i]);
+    const date = daily[i + 1] ? barDate(daily[i + 1]) : quoted > before ? quoted : nextWeekday(before);
+    return { date, closed: daily.slice(0, i + 1) };
+  }
+  const latest = daily.length ? barDate(daily.at(-1)) : quoted;
+  const date = quoted > latest ? quoted : latest;
+  return { date, closed: daily.filter((bar) => barDate(bar) < date) };
+}
+
 // The bar whose close a period is measured from, or undefined when the
 // history does not reach back that far. A weekly bar is stamped on the Sunday
 // and closes on the Friday, five days later.
-function referenceBar(spec, session, daily, weekly) {
-  if (spec.sessions) return daily?.filter((bar) => barDate(bar) < session).at(-spec.sessions);
-  const target = monthsBefore(session, spec.months);
+function referenceBar(spec, session, weekly) {
+  if (spec.sessions) return session.closed.at(-spec.sessions);
+  const target = monthsBefore(session.date, spec.months);
   if (spec.chart === 'week') return weekly?.filter((bar) => barDate([bar[0] + 5 * DAY_MS]) <= target).at(-1);
-  return daily?.filter((bar) => barDate(bar) < session && barDate(bar) <= target).at(-1);
+  return session.closed.filter((bar) => barDate(bar) <= target).at(-1);
 }
 
 async function loadRange(range) {
   const spec = RANGES[range];
-  const today = new Date().toISOString().slice(0, 10);
   const [daily, weekly, charted] = await Promise.all([
-    spec.chart === 'week' ? null : HISTORY.day.get(),
+    HISTORY.day.get(),
     spec.chart === 'week' ? HISTORY.week.get() : null,
     HISTORY[spec.chart].get(),
   ]);
   const sparks = {};
   for (const symbol of SYMBOLS) {
-    const session = lastQuotes[symbol]?.date ?? today;
+    const session = sessionOf(lastQuotes[symbol], daily.value[symbol]);
     // Where the history is shorter than the period, the line starts at the
     // first bar there is. (The change over the period is a separate matter:
     // see loadBases, which reports none in that case.)
-    const reference = referenceBar(spec, session, daily?.value[symbol], weekly?.value[symbol])
+    const reference = referenceBar(spec, session, weekly?.value[symbol])
       ?? (spec.sessions ? null : charted.value[symbol]?.[0]);
     if (!reference) continue;
     // The line starts at the reference close and runs through everything since.
@@ -503,7 +563,7 @@ async function loadRange(range) {
     const series = thin([reference, ...line]);
     sparks[symbol] = { t: series.map((bar) => bar[0]), c: series.map((bar) => bar[1]), base: reference[1], step };
   }
-  return { value: sparks, at: charted.at, error: charted.error || daily?.error || weekly?.error || null };
+  return { value: sparks, at: charted.at, error: charted.error || daily.error || weekly?.error || null };
 }
 
 // The closing level each period is measured from, for every row: what the
@@ -511,16 +571,16 @@ async function loadRange(range) {
 // against. A period the history does not reach back to has no entry.
 async function loadBases() {
   const [daily, weekly] = await Promise.all([HISTORY.day.get(), HISTORY.week.get()]);
-  const today = new Date().toISOString().slice(0, 10);
-  const bases = {};
-  for (const [range, spec] of Object.entries(RANGES)) {
-    bases[range] = {};
-    for (const symbol of SYMBOLS) {
-      const reference = referenceBar(spec, lastQuotes[symbol]?.date ?? today, daily.value[symbol], weekly.value[symbol]);
+  const bases = Object.fromEntries(Object.keys(RANGES).map((range) => [range, {}]));
+  for (const symbol of SYMBOLS) {
+    const session = sessionOf(lastQuotes[symbol], daily.value[symbol]);
+    for (const [range, spec] of Object.entries(RANGES)) {
+      const reference = referenceBar(spec, session, weekly.value[symbol]);
       if (reference) bases[range][symbol] = reference[1];
     }
   }
-  return { value: bases, at: Math.min(daily.at, weekly.at), error: daily.error || weekly.error };
+  const incomplete = Boolean(daily.value[INCOMPLETE] || weekly.value[INCOMPLETE]);
+  return { value: bases, at: Math.min(daily.at, weekly.at), error: daily.error || weekly.error, incomplete };
 }
 
 // Fetches every period's history once at start-up, one bar size at a time, so
@@ -546,8 +606,8 @@ function sendJson(res, status, body) {
 
 async function sendData(res, key, get) {
   try {
-    const { value, at, error } = await get();
-    sendJson(res, 200, { [key]: value, fetchedAt: at, error });
+    const { value, at, error, incomplete } = await get();
+    sendJson(res, 200, { [key]: value, fetchedAt: at, error, incomplete: incomplete || Boolean(value?.[INCOMPLETE]) });
   } catch (err) {
     sendJson(res, 502, { error: err.message });
   }

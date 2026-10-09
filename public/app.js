@@ -5,6 +5,7 @@ import { $, el, fmt, getJson, signed, store, timeLabel } from './util.js';
 
 const SPARK_REFRESH_MS = 180_000;
 const BASES_REFRESH_MS = 600_000;
+const BASES_RETRY_MS = 20_000;
 const SPARK = { w: 76, h: 30, pad: 4 };
 const TILE_SPARK = { w: 200, h: 40, pad: 4 };
 const FLASH_MS = 700;
@@ -473,10 +474,14 @@ function showMode(mode) {
 // still collecting them, so try again shortly.
 async function refreshBases() {
   try {
-    state.bases = (await getJson('/api/bases')).bases;
+    const data = await getJson('/api/bases');
+    state.bases = data.bases;
     render();
+    // Some history failed to load (the network was not ready, say): the
+    // server is filling the gaps, so ask again shortly.
+    if (data.incomplete) setTimeout(refreshBases, BASES_RETRY_MS);
   } catch {
-    if (!state.bases['1w']) setTimeout(refreshBases, 15_000);
+    if (!state.bases['1w']) setTimeout(refreshBases, BASES_RETRY_MS);
   }
 }
 

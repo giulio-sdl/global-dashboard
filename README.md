@@ -79,6 +79,11 @@ and every visitor's refreshes go to the data feeds through the one server.
   session. Five days is the close five sessions earlier; months and years are the last close on or before the
   same date that long ago (the last weekly close for 5Y and 10Y). Futures use the continuous front-month
   contract, so their long-period changes include contract rolls.
+- **Which session a quote belongs to** is worked out from the close its 1-day change is measured from, found
+  among the daily closes, not from the date on the quote. The feed dates the closing quote of a US-listed
+  fund a day early, dates a future by the calendar day of its last trade, and moves to today's date before a
+  market has opened; counting back from that date put the 5-day and longer changes one session out. Index
+  constituents are measured from the same day as their index.
 - **52-week range**: taken from a year of daily highs and lows plus today's trading, because the feed's own
   figure is missing for many instruments and rounded or stale for currencies.
 
@@ -118,7 +123,18 @@ quoted by the feed, which leaves about 4% of the STOXX Europe 600 by weight with
 Two quirks of the feed are handled in [server.js](server.js). Shortly before an exchange opens it clears the
 day's figures (change reads 0.00); until trading starts the dashboard shows the last session's change instead,
 taken from the daily closes. And it is sometimes slow, most of all around the US open, so a refresh that takes
-more than 2.5 seconds returns the previous figures while it finishes in the background.
+more than 2.5 seconds returns the previous figures while it finishes in the background. A history load that
+comes back incomplete (the 07:30 job can start the server before the network is up after the Mac wakes) is
+retried after 20 seconds rather than kept for its usual cache time.
+
+For three S&P crypto indexes the feed rounds its own percentage change to one decimal (-2.70% for a fall of
+2.76%). Where the feed's percentage is further from the one its price and change imply than rounding can
+explain, the implied one is shown.
+
+Known weak spots of the feed, not corrected: the daily history of thinly traded contracts has gaps that differ
+from one request to the next (nickel most of all), and the S&P Bitcoin and Ethereum indexes get yesterday's
+daily close a few hours late. When one of the last five closes is missing, that row's 5-day change is measured
+from a session too early until the history is next refreshed (hourly).
 
 Not available from this feed: CSI 300 and BSE Sensex, non-US index
 futures other than Nikkei, the 52-week low for several commodity contracts, and direct quotes for the
