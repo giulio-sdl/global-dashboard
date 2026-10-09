@@ -49,10 +49,18 @@ and every visitor's refreshes go to the data feeds through the one server.
   it is empty until the instrument has traded after the close. The `proxy` of each index is set in
   [instruments.js](instruments.js): futures for the US indexes and the Nikkei, ETFs for the rest. ETFs are in
   US dollars, so their figure includes currency moves.
-- **Detail panel**: click any row or tile to open a panel with its key figures and a larger chart; the period
-  can be changed from inside the panel. For 11 of the 17 indexes it also shows the constituents: which ones
-  lifted or dragged the index most (index weight × price change), the same by sector, and a sortable table of
-  every constituent with its weight.
+- **Detail panel**: click any row or tile to open a panel with its key figures, its change over all eight
+  periods, and a larger chart with its own period buttons. For 11 of the 17 indexes it also shows the
+  constituents over the period selected there: which ones lifted or dragged the index most, the same by sector,
+  and a sortable table of every constituent with its weight.
+- **How constituent contributions are worked out**: a name's contribution is its weight at the start of the
+  period times its price change. Only today's weights are known, so the starting weight is worked back from
+  them, and the contributions add up to the move of the whole basket. Beyond one day each constituent needs
+  one small history request, so a period is slow the first time (about 7 seconds for the S&P 500) and cached
+  for 30 minutes. It uses today's members only: over years, companies that joined or left the index are not
+  accounted for, and constituent prices exclude the dividends that total-return indexes (DAX, SPI) include,
+  so the total drifts from the index's own change. The panel says so whenever the gap is material. A
+  constituent whose price history has a break (a change of trading currency, for instance) is left out.
 - **Crypto**: seven indexes (CoinDesk 20 and 5; S&P Broad Digital Market, MegaCap, ex-MegaCap, Bitcoin and
   Ethereum), and Bitcoin, Ether, XRP, BNB, Solana, Tron and Sui in US dollars. The S&P indexes have no intraday chart, and
   the three broad ones update once a day.

@@ -22,7 +22,7 @@ const dialog = $('#detail');
 const chart = lineSvg('spark big');
 const tach = buildTach();
 let getContext = () => ({});
-let open = null; // the instrument on show: { item, period, detail, error, sort, showAll }
+let open = null; // the instrument on show: { item, period, details (by period), error, sort, showAll }
 let timer = null;
 const lines = new Map(); // chart period → { at, sparks }: the lines fetched for the chart
 
@@ -80,6 +80,9 @@ export function initDetail(context) {
   // A click on the backdrop lands on the dialog element itself.
   dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close(); });
   dialog.addEventListener('close', () => {
+    // The event arrives a moment after closing; by then another instrument
+    // may already have been opened, and its state must be left alone.
+    if (dialog.open) return;
     clearInterval(timer);
     open = null;
   });
@@ -94,11 +97,14 @@ export function initDetail(context) {
   });
 }
 
-// Switches the chart to a period, fetching its lines if they are not at hand.
+// Switches the panel to a period: the chart, and what the constituents did
+// over it. Fetches whichever of the two is not at hand.
 async function showChart(period) {
   open.period = period;
   for (const button of document.querySelectorAll('#chart-periods button')) button.setAttribute('aria-pressed', String(button.dataset.period === period));
   renderDetail();
+  renderConstituents();
+  if (open.item.holdings) loadConstituents();
   if (Date.now() - (lines.get(period)?.at ?? 0) < LINES_TTL_MS) return;
   $('.d-plot', dialog).classList.add('loading');
   try {
@@ -111,25 +117,24 @@ async function showChart(period) {
 }
 
 export function openDetail(item) {
-  open = { item, period: null, detail: null, error: null, sort: { key: 'weight', dir: -1 }, showAll: false };
+  open = { item, period: null, details: {}, error: null, sort: { key: 'weight', dir: -1 }, showAll: false };
   $('#detail-title').textContent = item.name || item.symbol;
   dialog.showModal();
   dialog.scrollTop = 0;
-  showChart(FIRST_CHART[getContext(item).mode]);
-  renderConstituents();
   clearInterval(timer);
-  if (item.holdings) {
-    loadConstituents();
-    timer = setInterval(loadConstituents, REFRESH_MS);
-  }
+  showChart(FIRST_CHART[getContext(item).mode]);
+  // Keeps the constituents of the period on show up to date.
+  if (item.holdings) timer = setInterval(loadConstituents, REFRESH_MS);
 }
 
+// Fetches the constituents' moves over the period on show.
 async function loadConstituents() {
   const shown = open;
+  const period = shown.period;
   try {
-    const { detail } = await getJson(`/api/index?symbol=${encodeURIComponent(shown.item.symbol)}`);
+    const { detail } = await getJson(`/api/index?symbol=${encodeURIComponent(shown.item.symbol)}&range=${period}`);
     if (open !== shown) return;
-    shown.detail = analyse(detail);
+    shown.details[period] = analyse(detail);
     shown.error = null;
   } catch (err) {
     if (open !== shown) return;
@@ -170,11 +175,13 @@ export function renderDetail() {
     stat('52-week range', range(q.yrLow, q.yrHigh)),
   ];
   if (after) stats.push(stat(`Since close · ${after.tag}`, `${signed(after.pct, 2, '%').text}, about ${fmt(after.level, q.dp)}`));
-  const d = open.detail;
+  // What the constituents did over the period on show.
+  const d = open.details[open.period];
   if (d) {
     stats.push(stat('Ten largest', `${fmt(d.topTen, 1)}% of index`));
     if (d.session !== 'awaiting') {
-      stats.push(stat('Rising / falling', `${d.rising} / ${d.falling}`), stat('Constituents, weighted', signed(d.weightedMove, 2, '%').text));
+      const over = PERIOD_SHORT[open.period];
+      stats.push(stat(`Rising / falling · ${over}`, `${d.rising} / ${d.falling}`), stat(`Constituents, weighted · ${over}`, changeText(d.weightedMove, false).text));
     }
   }
   $('.d-stats', dialog).replaceChildren(...stats);
@@ -199,12 +206,24 @@ export function renderDetail() {
 
 // ---- its constituents -------------------------------------------------------
 
-// Adds each constituent's contribution to the index move (weight × change, in
-// percentage points) and the totals the panel reports.
+// Adds each constituent's contribution to the index move, in percentage
+// points, and the totals the panel reports.
+//
+// A contribution is the weight a name had at the START of the period times
+// its price change. Only today's weights are known, so the starting weight is
+// worked back from them: a name that has doubled while the index stood still
+// weighed half as much then. The contributions then add up to the move of the
+// whole basket. For a single day this is all but the same as weight × change.
 function analyse(detail) {
-  const rows = detail.constituents.map((c) => ({ ...c, contribution: c.changePct == null ? null : (c.weight * c.changePct) / 100 }));
+  const priced = detail.constituents.filter((c) => c.changePct != null && c.changePct > -100);
+  const sum = (list, value) => list.reduce((total, r) => total + value(r), 0);
+  const weight = sum(priced, (c) => c.weight);
+  // How the basket as a whole moved: its value now over its value then.
+  const growth = weight / sum(priced, (c) => c.weight / (1 + c.changePct / 100));
+  const contribution = (c) => (c.weight * growth * (c.changePct / 100)) / (1 + c.changePct / 100);
+
+  const rows = detail.constituents.map((c) => ({ ...c, contribution: priced.includes(c) ? contribution(c) : null }));
   const quoted = rows.filter((r) => r.contribution != null);
-  const sum = (list, key) => list.reduce((total, r) => total + r[key], 0);
   const direction = (r) => signed(r.changePct, 2).dir;
 
   const sectors = new Map();
@@ -214,28 +233,27 @@ function analyse(detail) {
     s.contribution += r.contribution ?? 0;
   }
 
-  const quotedWeight = sum(quoted, 'weight');
   return {
     ...detail,
     rows,
     rising: quoted.filter((r) => direction(r) === 'up').length,
     falling: quoted.filter((r) => direction(r) === 'down').length,
-    topTen: sum(rows.slice(0, 10), 'weight'),
-    // Scaled to the quoted share, so missing quotes do not shrink the figure.
-    weightedMove: quotedWeight ? (sum(quoted, 'contribution') / quotedWeight) * 100 : null,
-    coverage: (quotedWeight / sum(rows, 'weight')) * 100,
+    topTen: sum(rows.slice(0, 10), (r) => r.weight),
+    weightedMove: weight ? (growth - 1) * 100 : null,
+    coverage: (weight / sum(rows, (r) => r.weight)) * 100,
     lifted: quoted.filter((r) => r.contribution > 0).sort((a, b) => b.contribution - a.contribution).slice(0, MOVERS_SHOWN),
     dragged: quoted.filter((r) => r.contribution < 0).sort((a, b) => a.contribution - b.contribution).slice(0, MOVERS_SHOWN),
     sectors: [...sectors.values()].sort((a, b) => b.contribution - a.contribution),
   };
 }
 
-const points = (value) => `${signed(value, 3).text} pp`;
+// Percentage points, with fewer decimals as the figure grows.
+const points = (value) => `${signed(value, Math.abs(value ?? 0) >= 10 ? 1 : Math.abs(value ?? 0) >= 1 ? 2 : 3).text} pp`;
 
 function moverList(title, rows, scale) {
   const list = el('ol', { class: 'movers' });
   for (const r of rows) {
-    const chg = signed(r.changePct, 2, '%');
+    const chg = changeText(r.changePct, false);
     const bar = el('i', { class: r.contribution > 0 ? 'up' : 'down' });
     bar.style.width = `${Math.max(1.5, (Math.abs(r.contribution) / scale) * 100)}%`;
     list.append(el('li', {},
@@ -245,7 +263,7 @@ function moverList(title, rows, scale) {
       el('span', { class: 'mv-val', text: points(r.contribution) }),
     ));
   }
-  if (!rows.length) list.append(el('li', { class: 'none', text: 'None in the latest session' }));
+  if (!rows.length) list.append(el('li', { class: 'none', text: 'None over this period' }));
   return el('div', {}, el('h4', { text: title }), list);
 }
 
@@ -303,7 +321,7 @@ function constituentTable(d) {
 
   const body = el('tbody');
   for (const r of shown) {
-    const chg = signed(r.changePct, 2, '%');
+    const chg = changeText(r.changePct, false);
     body.append(el('tr', {},
       el('th', { scope: 'row' }, el('span', { class: 'nm', text: r.name }), el('span', { class: 'sub', text: r.ticker })),
       el('td', { class: 'd-sector', text: r.sector }),
@@ -331,24 +349,41 @@ function renderConstituents() {
   const note = (text) => box.replaceChildren(el('p', { class: 'd-note', text }));
   if (!open.item.index) return box.replaceChildren(); // only indexes have constituents
   if (!open.item.holdings) return note('Constituents and weights are not available for this index from the data sources this dashboard uses.');
-  const d = open.detail;
-  if (!d) return note(open.error ? `Could not load the constituents (${open.error}).` : 'Loading constituents…');
+  const period = PERIOD_NAME[open.period].toLowerCase();
+  const d = open.details[open.period];
+  if (!d) {
+    return note(open.error
+      ? `Could not load the constituents (${open.error}).`
+      : open.period === '1d' ? 'Loading constituents…' : `Working out what each constituent did over ${period}…`);
+  }
 
   const scale = Math.max(...[...d.lifted, ...d.dragged].map((r) => Math.abs(r.contribution))) || 1;
+  const when = open.period !== '1d'
+    ? `Over ${period}, for the companies in the index today at today's weights; any that joined or left it since are not accounted for.`
+    : d.session === 'previous' ? 'Previous session; the new one has not started.' : 'Latest session.';
+  // Over longer periods today's members stop adding up to the index's own
+  // move (companies join and leave it, and some indexes count dividends).
+  // When the gap is material, say so rather than present the breakdown as exact.
+  const indexMove = getContext(open.item).changes?.[PERIODS.indexOf(open.period)];
+  const gap = indexMove == null || d.weightedMove == null ? 0 : Math.abs(d.weightedMove - indexMove);
+  const caution = open.period !== '1d' && gap > Math.max(1.5, Math.abs(indexMove) * 0.15)
+    ? [el('p', { class: 'd-note warn', text: `These constituents add up to ${changeText(d.weightedMove, false).text}, but the index itself moved ${changeText(indexMove, false).text} over this period. The gap comes from companies that joined or left the index, and from dividends where the index counts them, so read this breakdown as a guide rather than an exact account.` })]
+    : [];
   // Just before the open the feed clears every stock's change, so there is no session to break down yet.
   const movers = d.session === 'awaiting'
     ? [el('p', { class: 'd-note', text: 'The new session has not started and the data feed has already cleared the previous session\'s changes. The movers will appear once trading begins.' })]
     : [
-      el('p', { class: 'd-note', text: `${d.session === 'previous' ? 'Previous session; the new one has not started.' : 'Latest session.'} Contribution is index weight × price change, in percentage points (pp) of the index.` }),
+      el('p', { class: 'd-note', text: `${when} Contribution is how much of the index's move came from each name, in percentage points (pp).` }),
+      ...caution,
       el('div', { class: 'd-cols' }, moverList('Lifted it most', d.lifted, scale), moverList('Dragged it most', d.dragged, scale)),
       el('h3', { text: 'By sector' }),
       sectorList(d.sectors),
     ];
   box.replaceChildren(
-    el('h3', { text: 'What moved the index' }),
+    el('h3', { text: `What moved the index · ${PERIOD_SHORT[open.period]}` }),
     ...movers,
     el('h3', { text: 'Constituents' }),
     ...constituentTable(d),
-    el('p', { class: 'd-note', text: `Weights are those of the ${d.etf}, which tracks the index, as of ${d.asOf}. Live quotes cover ${fmt(d.coverage, 1)}% of the index by weight.` }),
+    el('p', { class: 'd-note', text: `Weights are those of the ${d.etf}, which tracks the index, as of ${d.asOf}. Prices cover ${fmt(d.coverage, 1)}% of the index by weight over this period.` }),
   );
 }
