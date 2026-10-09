@@ -24,6 +24,8 @@ const QUOTE_TIMEOUT_MS = 6_000;
 const QUOTE_CONCURRENCY = 4;
 const CONSTITUENT_TTL_MS = 60_000;
 const HOLDINGS_TTL_MS = 12 * 3600_000;
+const REFERENCE_TTL_MS = 30 * 60_000;
+const REFERENCE_CONCURRENCY = 16; // several hundred small requests per index and period
 const SPARK_TTL_MS = 180_000;
 const SPARK_CONCURRENCY = 8;
 const SESSION_GAP_MS = 3 * 3600_000; // a longer pause than this starts a new session
@@ -235,67 +237,122 @@ const INDEX_ITEMS = new Map(
     .filter((item) => item.holdings)
     .map((item) => [item.symbol, item]),
 );
-const indexDetails = new Map();
 const lastLiveDetail = new Map();
 
-async function loadConstituents(item, getHoldings) {
-  const { value: holdings } = await getHoldings();
+// One cached loader per key, made on first use.
+function keyed(ttlMs, load) {
+  const loaders = new Map();
+  return (key, ...args) => {
+    if (!loaders.has(key)) loaders.set(key, cached(ttlMs, () => load(...args)));
+    return loaders.get(key)();
+  };
+}
+
+const holdingsOf = keyed(HOLDINGS_TTL_MS, (item) => loadHoldings(item.holdings.fund));
+
+// An index's holdings, each with the symbol it is quoted under and its live quote.
+const pricedOf = keyed(CONSTITUENT_TTL_MS, async (item) => {
+  const { value: holdings } = await holdingsOf(item.symbol, item);
   const quotes = await fetchQuotes(holdings.items.flatMap((h) => h.symbols));
   // The feed occasionally drops a symbol from a batch; ask once more for the gaps.
   const missed = holdings.items.filter((h) => !h.symbols.some((s) => quotes[s])).flatMap((h) => h.symbols);
   if (missed.length) Object.assign(quotes, await fetchQuotes(missed).catch(() => ({})));
+  return {
+    asOf: holdings.asOf,
+    rows: holdings.items.map((holding) => {
+      const symbol = holding.symbols.find((s) => quotes[s]);
+      return { holding, symbol, quote: quotes[symbol] ?? null };
+    }),
+  };
+});
 
-  const priced = holdings.items.map((h) => quotes[h.symbols.find((s) => quotes[s])]).filter(Boolean);
-  const cleared = priced.filter(awaitingOpen).length;
+// Each constituent's close at the start of a period, measured the same way
+// as the index's own change: five sessions back, or the last close on or
+// before the same date that long ago. One small request per constituent.
+const referencesOf = keyed(REFERENCE_TTL_MS, async (item, range) => {
+  const spec = RANGES[range];
+  const { value: priced } = await pricedOf(item.symbol, item);
+  const sessions = new Map(priced.rows.filter((row) => row.quote).map((row) => [row.symbol, row.quote.date]));
+  const today = new Date().toISOString().slice(0, 10);
+  return forEachSymbol(async (symbol) => {
+    const session = sessions.get(symbol) ?? today;
+    if (spec.sessions) {
+      const bars = await loadBarsBetween(symbol, '1D', Date.now() - 16 * DAY_MS, Date.now() + DAY_MS);
+      return bars.filter((bar) => barDate(bar) < session).at(-spec.sessions)?.[1];
+    }
+    const target = monthsBefore(session, spec.months);
+    const bars = await loadBarsBetween(symbol, '1D', Date.parse(target) - 12 * DAY_MS, Date.parse(target) + 2 * DAY_MS);
+    return bars.filter((bar) => barDate(bar) <= target).at(-1)?.[1];
+  }, [...sessions.keys()], REFERENCE_CONCURRENCY);
+});
+
+// How many times over a share price can believably have multiplied in each
+// period. A bigger jump, or a fall of more than nine tenths, is taken to be a
+// break in the price history rather than a real move: a share that changed
+// the currency or unit it trades in (pence to dollars, say). One such name
+// would otherwise swamp the whole calculation, so it is left without a change.
+const PLAUSIBLE_GROWTH = { '1w': 5, '1m': 5, '3m': 10, '6m': 10, '1y': 20, '5y': 60, '10y': 400 };
+
+function plausibleChange(last, reference, period) {
+  const growth = reference ? last / reference : null;
+  return growth == null || growth < 0.1 || growth > PLAUSIBLE_GROWTH[period] ? null : (growth - 1) * 100;
+}
+
+// The constituents of an index with their weights and their change over a
+// period: one day from the quotes themselves, anything longer against the
+// reference closes above.
+async function getIndexDetail(symbol, range) {
+  const item = INDEX_ITEMS.get(symbol);
+  if (!item) throw new Error('no constituent data for this index');
+  const period = RANGES[range] ? range : '1d';
+  const priced = await pricedOf(symbol, item);
+  const references = period === '1d' ? null : (await referencesOf(`${symbol}|${period}`, item, period)).value;
   const detail = {
     etf: item.holdings.etf,
-    asOf: holdings.asOf,
-    constituents: holdings.items.map((h) => {
-      const q = quotes[h.symbols.find((s) => quotes[s])];
+    asOf: priced.value.asOf,
+    period,
+    constituents: priced.value.rows.map(({ holding, symbol: quoted, quote }) => {
+      const reference = references?.[quoted];
       return {
-        ticker: h.ticker,
-        name: q?.fullName || h.name,
-        sector: h.sector,
-        weight: h.weight,
-        last: q?.last ?? null,
-        changePct: q?.changePct ?? null,
-        dp: q?.dp ?? 2,
-        currency: q?.currency ?? h.currency,
+        ticker: holding.ticker,
+        name: quote?.fullName || holding.name,
+        sector: holding.sector,
+        weight: holding.weight,
+        last: quote?.last ?? null,
+        changePct: !quote ? null : !references ? quote.changePct : plausibleChange(quote.last, reference, period),
+        dp: quote?.dp ?? 2,
+        currency: quote?.currency ?? holding.currency,
       };
     }),
   };
+  const result = (value) => ({ value, at: priced.at, error: priced.error });
+  if (period !== '1d') return result(detail);
 
   // Before the open the feed has cleared every constituent's change. Serve
   // the last session seen instead, or say that there is nothing to show yet.
-  if (priced.length && cleared / priced.length > 0.8) {
-    const previous = lastLiveDetail.get(item.symbol);
-    return previous ? { ...previous, session: 'previous' } : { ...detail, session: 'awaiting' };
+  const quoted = priced.value.rows.filter((row) => row.quote);
+  if (quoted.length && quoted.filter((row) => awaitingOpen(row.quote)).length / quoted.length > 0.8) {
+    const previous = lastLiveDetail.get(symbol);
+    return result(previous ? { ...previous, session: 'previous' } : { ...detail, session: 'awaiting' });
   }
-  lastLiveDetail.set(item.symbol, detail);
-  return detail;
-}
-
-function getIndexDetail(symbol) {
-  const item = INDEX_ITEMS.get(symbol);
-  if (!item) throw new Error('no constituent data for this index');
-  if (!indexDetails.has(symbol)) {
-    const getHoldings = cached(HOLDINGS_TTL_MS, () => loadHoldings(item.holdings.fund));
-    indexDetails.set(symbol, cached(CONSTITUENT_TTL_MS, () => loadConstituents(item, getHoldings)));
-  }
-  return indexDetails.get(symbol)();
+  lastLiveDetail.set(symbol, detail);
+  return result(detail);
 }
 
 // ---- intraday sparklines --------------------------------------------------
 
 const stamp = (d) => d.toISOString().replace(/\D/g, '').slice(0, 14);
 
-async function loadBars(symbol, interval, daysBack) {
+function loadBars(symbol, interval, daysBack) {
   const now = Date.now();
   // The feed counts bars from the requested start, so the start is put on the
   // hour: 10-minute and hourly bars then always fall on the same clock times,
   // whenever they are fetched.
-  const start = Math.floor((now - daysBack * DAY_MS) / 3600_000) * 3600_000;
-  const url = `${BARS_URL}/${encodeURIComponent(symbol)}/${interval}/${stamp(new Date(start))}/${stamp(new Date(now + DAY_MS))}/adjusted/GMT.json`;
+  return loadBarsBetween(symbol, interval, Math.floor((now - daysBack * DAY_MS) / 3600_000) * 3600_000, now + DAY_MS);
+}
+
+async function loadBarsBetween(symbol, interval, start, end) {
+  const url = `${BARS_URL}/${encodeURIComponent(symbol)}/${interval}/${stamp(new Date(start))}/${stamp(new Date(end))}/adjusted/GMT.json`;
   const data = await fetchJson(url);
   // Each bar is [time, close, high, low]. The feed marks a missing high or low
   // with a negative number; the close stands in for it.
@@ -340,11 +397,11 @@ async function loadSpark(symbol) {
 }
 
 // Runs `load` for every symbol, a few at a time, and keeps what succeeds.
-async function forEachSymbol(load, symbols = SYMBOLS) {
+async function forEachSymbol(load, symbols = SYMBOLS, concurrency = SPARK_CONCURRENCY) {
   const results = {};
   const queue = [...symbols];
   let failures = 0;
-  await Promise.all(Array.from({ length: SPARK_CONCURRENCY }, async () => {
+  await Promise.all(Array.from({ length: concurrency }, async () => {
     for (let symbol; (symbol = queue.shift()); ) {
       try {
         const result = await load(symbol);
@@ -513,7 +570,7 @@ http
     const { pathname, searchParams } = new URL(req.url, 'http://localhost');
     if (pathname === '/api/config') return sendJson(res, 200, { sections: SECTIONS, markets: MARKETS, overview: OVERVIEW });
     if (pathname === '/api/quotes') return sendData(res, 'quotes', getQuotes);
-    if (pathname === '/api/index') return sendData(res, 'detail', async () => getIndexDetail(searchParams.get('symbol')));
+    if (pathname === '/api/index') return sendData(res, 'detail', () => getIndexDetail(searchParams.get('symbol'), searchParams.get('range')));
     if (pathname === '/api/bases') return sendData(res, 'bases', loadBases);
     if (pathname === '/api/sparks') return sendData(res, 'sparks', () => getSparks(searchParams.get('range')));
     return sendStatic(res, decodeURIComponent(pathname));
