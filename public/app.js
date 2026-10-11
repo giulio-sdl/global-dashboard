@@ -1,4 +1,5 @@
 import { hideTip, lineSvg, plotLine, showTip } from './chart.js';
+import { initCompany } from './company.js';
 import { initDetail, openDetail, renderDetail } from './detail.js';
 import { changeOver, changeText, lineView, MODES, PERIOD_NAME, PERIOD_SHORT, PERIODS, setChange } from './periods.js';
 import { $, el, fmt, getJson, signed, store, timeLabel } from './util.js';
@@ -17,7 +18,7 @@ const REV_FULL = { '1d': 2, '6m': 25 };
 // `mode` is the view (short or long term). `sparks` are the trend lines for
 // `sparksFor`, the line period of the view they were loaded for. `bases` are
 // the closing levels every period is measured from.
-const state = { config: null, quotes: {}, sparks: {}, sparksFor: null, bases: {}, basesIncomplete: false, mode: 'short', lineRequest: 0, fetchedAt: null, intervalMs: 30_000, timer: null };
+const state = { config: null, quotes: {}, sparks: {}, sparksFor: null, bases: {}, basesIncomplete: false, backup: {}, mode: 'short', lineRequest: 0, fetchedAt: null, intervalMs: 30_000, timer: null };
 
 function duration(minutes) {
   const m = Math.max(0, Math.round(minutes));
@@ -244,7 +245,9 @@ function renderRow(tr) {
   const item = tr.item;
   const cells = tr.children;
 
-  $('.sub', cells[0]).textContent = [item.note, q.contract, item.unit, timeLabel(q.time)].filter(Boolean).join(' · ');
+  // A row whose history is standing in from another source says so.
+  const backup = state.backup[tr.dataset.sym] && `history: ${state.backup[tr.dataset.sym]}`;
+  $('.sub', cells[0]).textContent = [item.note, q.contract, item.unit, timeLabel(q.time), backup].filter(Boolean).join(' · ');
   cells[0].title = q.fullName || '';
   flashOnChange(cells[1], q.last);
   cells[1].textContent = item.yield ? `${fmt(q.last, YIELD_DP)}%` : fmt(q.last, q.dp);
@@ -475,14 +478,18 @@ function showMode(mode) {
 async function refreshBases() {
   try {
     const data = await getJson('/api/bases');
+    const count = (bases) => Object.values(bases).reduce((rows, period) => rows + Object.keys(period).length, 0);
+    const filled = count(data.bases) > count(state.bases);
     const filling = state.basesIncomplete;
     state.bases = data.bases;
     state.basesIncomplete = data.incomplete;
+    state.backup = data.backup ?? {};
     render();
     // Some history failed to load (the network was not ready, or the feed
     // answered with nothing): the server is filling the gaps, so ask again
-    // shortly, and fetch the trend lines of the rows that have just been filled.
-    if (filling) loadLines({ quiet: true });
+    // shortly. When rows have just been filled, fetch their trend lines too.
+    // (A gap that never fills keeps this asking, but not the lines.)
+    if (filling && filled) loadLines({ quiet: true });
     if (data.incomplete) setTimeout(refreshBases, BASES_RETRY_MS);
   } catch {
     if (!state.bases['1w']) setTimeout(refreshBases, BASES_RETRY_MS);
@@ -573,6 +580,7 @@ function initControls() {
 async function init() {
   initControls();
   initDetail(detailContext);
+  initCompany();
   try {
     state.config = await getJson('/api/config');
   } catch (err) {

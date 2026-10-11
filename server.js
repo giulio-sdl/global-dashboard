@@ -4,6 +4,8 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createEdgar } from './edgar.js';
+import { loadFredSeries, weekly as weeklyBars } from './fred.js';
 import { loadHoldings } from './holdings.js';
 import { MARKETS, OVERVIEW, SECTIONS } from './instruments.js';
 import { sinceClose } from './sinceclose.js';
@@ -12,7 +14,18 @@ const PORT = Number(process.env.PORT) || 5177;
 // Only this computer can reach the server unless HOST says otherwise; a
 // hosting service sets HOST=0.0.0.0 to accept visitors.
 const HOST = process.env.HOST || '127.0.0.1';
-const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
+const PUBLIC_DIR = path.join(ROOT, 'public');
+
+// Settings for this computer only, kept out of the repository: the contact
+// address the SEC asks every program to give (see edgar.js). SEC_CONTACT in
+// the environment does the same on a hosting service.
+const SETTINGS = await readFile(path.join(ROOT, 'settings.local.json'), 'utf8').then(JSON.parse).catch((err) => {
+  // No file is the normal case; one that does not parse is worth a line in the log, not a stopped server.
+  if (err.code !== 'ENOENT') console.error(`settings.local.json was not read: ${err.message}`);
+  return {};
+});
+const edgarFinancials = createEdgar({ contact: process.env.SEC_CONTACT || SETTINGS.secContact, cacheDir: path.join(ROOT, '.cache', 'edgar') });
 
 const QUOTE_URL = 'https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol';
 const BARS_URL = 'https://ts-api.cnbc.com/harmony/app/bars';
@@ -25,6 +38,8 @@ const QUOTE_CONCURRENCY = 4;
 const CONSTITUENT_TTL_MS = 60_000;
 const HOLDINGS_TTL_MS = 12 * 3600_000;
 const REFERENCE_TTL_MS = 30 * 60_000;
+const FRED_TTL_MS = 6 * 3600_000; // FRED adds one figure a day
+const BACKUP_AFTER_MS = 12 * 3600_000;
 const REFERENCE_CONCURRENCY = 16; // several hundred small requests per index and period
 const SPARK_TTL_MS = 180_000;
 const SPARK_CONCURRENCY = 8;
@@ -39,6 +54,10 @@ const SYMBOLS = [...new Set(SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.gro
 // Where each row's chart history comes from: its own symbol, unless it names another.
 const CHART_SYMBOL = new Map(SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) =>
   g.items.filter((item) => item.symbol).map((item) => [item.symbol, item.chart ?? item.symbol])))));
+
+// Rows with a second source for their history: the FRED series each one names.
+const FRED_SERIES = new Map(SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) =>
+  g.items.filter((item) => item.fred).map((item) => [item.symbol, item.fred])))));
 
 // Indexes whose move since the close is read from a future or ETF that keeps trading.
 const PROXIED = SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) =>
@@ -138,7 +157,43 @@ function change(last, changeText, pctText) {
   return { change: delta, prevClose: prev, changePct: stated == null || coarse ? derived : stated };
 }
 
-function normalizeQuote(raw) {
+// "4.913T", "466.823B", "35.52M", "33,372,853" and "0.32%" as numbers.
+function amount(text) {
+  const match = /^(-?[\d,.]+)\s*([KMBT])?%?$/.exec(String(text ?? '').trim());
+  const n = match ? Number(match[1].replace(/,/g, '')) : NaN;
+  return Number.isFinite(n) ? n * ({ K: 1e3, M: 1e6, B: 1e9, T: 1e12 }[match[2]] ?? 1) : null;
+}
+
+// What the feed knows about a company besides its price: the figures of a
+// share's summary page. Indexes, futures and currencies have none.
+function companyStats(raw) {
+  if (raw.mktcapView == null && raw.pe == null && raw.sharesout == null) return null;
+  return {
+    exchange: raw.exchange || null,
+    open: amount(raw.open),
+    volume: amount(raw.volume),
+    averageVolume: amount(raw.tendayavgvol),
+    marketCap: amount(raw.mktcapView),
+    sharesOutstanding: amount(raw.sharesout),
+    pe: amount(raw.pe),
+    forwardPe: amount(raw.fpe),
+    eps: amount(raw.eps),
+    forwardEps: amount(raw.feps),
+    priceToSales: amount(raw.psales),
+    dividend: amount(raw.dividend),
+    dividendYield: amount(raw.dividendyield),
+    beta: amount(raw.beta),
+    revenue: amount(raw.revenuettm),
+    ebitda: amount(raw.TTMEBITD),
+    grossMargin: amount(raw.GROSMGNTTM),
+    netMargin: amount(raw.NETPROFTTM),
+    returnOnEquity: amount(raw.ROETTM),
+    debtToEquity: amount(raw.DEBTEQTYQ),
+  };
+}
+
+// `withStats` adds a company's key figures; the dashboard's own rows go without.
+function normalizeQuote(raw, withStats = false) {
   const last = num(raw.last);
   if (raw.code !== 0 || last == null) return null;
   const ext = raw.ExtendedMktQuote;
@@ -158,6 +213,7 @@ function normalizeQuote(raw) {
     session: raw.curmktstatus || null,
     contract: /\(([A-Z][a-z]{2})'(\d{2})\)/.exec(raw.name || '')?.slice(1, 3).join(" '") || null,
     fullName: raw.name || null,
+    stats: withStats ? companyStats(raw) : undefined,
     ext: extLast == null ? null : {
       type: ext.type || null,
       last: extLast,
@@ -169,7 +225,7 @@ function normalizeQuote(raw) {
 
 // Quotes for any list of symbols, fetched in batches, a few batches at a time.
 // Symbols the feed does not know are simply absent from the result.
-async function fetchQuotes(symbols) {
+async function fetchQuotes(symbols, withStats = false) {
   const quotes = {};
   const batches = [];
   for (let i = 0; i < symbols.length; i += QUOTE_BATCH) batches.push(symbols.slice(i, i + QUOTE_BATCH));
@@ -184,7 +240,7 @@ async function fetchQuotes(symbols) {
     try {
       const data = await fetchJson(`${QUOTE_URL}?${params}`, QUOTE_TIMEOUT_MS);
       for (const raw of [].concat(data?.FormattedQuoteResult?.FormattedQuote ?? [])) {
-        const q = normalizeQuote(raw);
+        const q = normalizeQuote(raw, withStats);
         if (q) quotes[raw.symbol] = q;
       }
     } catch (err) {
@@ -290,10 +346,10 @@ const holdingsOf = keyed(HOLDINGS_TTL_MS, (item) => loadHoldings(item.holdings.f
 // An index's holdings, each with the symbol it is quoted under and its live quote.
 const pricedOf = keyed(CONSTITUENT_TTL_MS, async (item) => {
   const { value: holdings } = await holdingsOf(item.symbol, item);
-  const quotes = await fetchQuotes(holdings.items.flatMap((h) => h.symbols));
+  const quotes = await fetchQuotes(holdings.items.flatMap((h) => h.symbols), true);
   // The feed occasionally drops a symbol from a batch; ask once more for the gaps.
   const missed = holdings.items.filter((h) => !h.symbols.some((s) => quotes[s])).flatMap((h) => h.symbols);
-  if (missed.length) Object.assign(quotes, await fetchQuotes(missed).catch(() => ({})));
+  if (missed.length) Object.assign(quotes, await fetchQuotes(missed, true).catch(() => ({})));
   return {
     asOf: holdings.asOf,
     rows: holdings.items.map((holding) => {
@@ -354,6 +410,7 @@ async function getIndexDetail(symbol, range) {
     constituents: priced.value.rows.map(({ holding, symbol: quoted, quote }) => {
       const reference = references?.[quoted];
       return {
+        symbol: quoted,
         ticker: holding.ticker,
         name: quote?.fullName || holding.name,
         sector: holding.sector,
@@ -377,6 +434,26 @@ async function getIndexDetail(symbol, range) {
   }
   lastLiveDetail.set(symbol, detail);
   return result(detail);
+}
+
+// One constituent of an index as a company: its price and key figures from
+// the quote feed, its financial statements from the SEC. A share listed in
+// the US is quoted under its bare ticker; elsewhere the symbol ends in a
+// country code, which decides how the SEC's registrant is looked up.
+async function constituent(indexSymbol, symbol) {
+  const item = INDEX_ITEMS.get(indexSymbol);
+  if (!item) throw new Error('no constituent data for this index');
+  const priced = await pricedOf(indexSymbol, item);
+  const row = priced.value.rows.find((candidate) => candidate.symbol === symbol);
+  if (!row?.quote) throw new Error('not a constituent of this index');
+  return { item, priced, ...row };
+}
+
+async function getCompany(indexSymbol, symbol) {
+  const { item, priced, holding, quote } = await constituent(indexSymbol, symbol);
+  const filings = await edgarFinancials({ ticker: holding.ticker, names: [quote.fullName, holding.name].filter(Boolean), us: !/-[A-Z]{2}$/.test(symbol) });
+  const company = { symbol, ticker: holding.ticker, name: quote.fullName || holding.name, sector: holding.sector, weight: holding.weight, index: item.name, quote, filings };
+  return { value: company, at: priced.at, error: priced.error };
 }
 
 // ---- intraday sparklines --------------------------------------------------
@@ -429,14 +506,16 @@ function lastSession(bars) {
   return { t: session.map((b) => b[0]), c: session.map((b) => b[1]) };
 }
 
-async function loadSpark(symbol) {
+// The latest session of anything the feed charts, in ten-minute bars.
+async function intraday(symbol) {
   // Two days covers a normal weekday; widen for weekends and holidays.
-  let bars = await loadBars(CHART_SYMBOL.get(symbol), '10M', 2);
-  if (bars.length < 2) bars = await loadBars(CHART_SYMBOL.get(symbol), '10M', 7);
+  let bars = await loadBars(symbol, '10M', 2);
+  if (bars.length < 2) bars = await loadBars(symbol, '10M', 7);
   return lastSession(bars);
 }
 
-// Runs `load` for every symbol, a few at a time, and keeps what succeeds.
+const loadSpark = (symbol) => intraday(CHART_SYMBOL.get(symbol));
+
 // Runs `load` for every symbol, a few at a time. Symbols that fail get one
 // more try; if any still fail the result names them, so it is not mistaken for
 // the full picture. Given an earlier result that was incomplete (`known`),
@@ -479,13 +558,54 @@ for (const source of Object.values(HISTORY)) {
   // That is not the same as an instrument having none: every one has daily
   // and weekly bars, and hourly ones if it has had them before. So an empty
   // answer counts as a failed request and is asked for again.
-  const charted = new Set();
-  source.get = cached(source.ttlMs, (known) => forEachSymbol(async (symbol) => {
-    const bars = await loadBars(CHART_SYMBOL.get(symbol), source.interval, source.daysBack);
-    if (bars.length) charted.add(symbol);
-    else if (source !== HISTORY.hour || charted.has(symbol)) throw new Error('no bars');
-    return bars.length ? bars : null;
-  }, SYMBOLS, SPARK_CONCURRENCY, known));
+  const charted = new Map(); // when the feed last had bars for each symbol
+  source.get = cached(source.ttlMs, async (known) => {
+    const loaded = await forEachSymbol(async (symbol) => {
+      const bars = await loadBars(CHART_SYMBOL.get(symbol), source.interval, source.daysBack);
+      if (bars.length) {
+        charted.set(symbol, Date.now());
+        return bars;
+      }
+      if (source === HISTORY.hour && !charted.has(symbol)) return null;
+      throw new Error('no bars');
+    }, SYMBOLS, SPARK_CONCURRENCY, known).catch((err) => ({ outage: err }));
+    // With the feed's history down altogether, the stand-in is all there is.
+    const result = await standIn(loaded.outage ? markIncomplete({}, [...SYMBOLS]) : loaded, source, charted);
+    if (loaded.outage && !Object.keys(result).length) throw loaded.outage;
+    return result;
+  });
+}
+
+// Where the feed has had no history for a Treasury yield for half a day,
+// FRED's official series stands in (see fred.js). It has daily and weekly
+// closes but nothing within the day, so the hourly history goes without.
+// The bars are marked with their source, for the page to say so.
+const fredSeries = keyed(FRED_TTL_MS, (id) => loadFredSeries(id));
+
+async function standIn(loaded, source, charted) {
+  if (source === HISTORY.hour) return loaded;
+  for (const symbol of loaded[INCOMPLETE] ?? []) {
+    const id = FRED_SERIES.get(symbol);
+    if (!id || Date.now() - (charted.get(symbol) ?? 0) < BACKUP_AFTER_MS) continue;
+    const daily = await fredSeries(id, id).then((series) => series.value, () => null);
+    if (!daily) continue;
+    const bars = source === HISTORY.week ? weeklyBars(daily) : withYesterday(daily.filter((bar) => bar[0] >= Date.now() - source.daysBack * DAY_MS), lastQuotes[symbol]);
+    loaded[symbol] = Object.assign(bars, { source: 'FRED' });
+  }
+  return loaded;
+}
+
+// FRED publishes a day's yield the following afternoon, so through most of a
+// session its last close is from two sessions ago, and five sessions back
+// would be counted one too far. The close the quote's own change is measured
+// from is the missing day's, so it is added. (After a market holiday this adds
+// a day that did not trade: the five days then start one session late.)
+function withYesterday(daily, quote) {
+  if (!daily.length || !quote?.date || quote.prevClose == null || awaitingOpen(quote)) return daily;
+  const before = new Date(`${quote.date}T04:00:00Z`);
+  do before.setUTCDate(before.getUTCDate() - 1); while (before.getUTCDay() % 6 === 0);
+  if (barDate(daily.at(-1)) >= barDate([before.getTime()])) return daily;
+  return [...daily, [before.getTime(), quote.prevClose, quote.prevClose, quote.prevClose]];
 }
 
 // Every period is measured from a closing level, counted back from the
@@ -566,6 +686,25 @@ function referenceBar(spec, session, weekly) {
   return session.closed.filter((bar) => barDate(bar) <= target).at(-1);
 }
 
+// One instrument's line over a period, and the close the period's change is
+// measured from (`from`, null when the history does not reach back that far).
+// `charted` holds the bars of the size the period is drawn in.
+function lineFor(spec, session, daily, weekly, charted) {
+  const start = referenceBar(spec, session, weekly);
+  // Where the history is shorter than the period, the line starts at the
+  // first bar there is, and no change over the period is given.
+  const reference = start ?? (spec.sessions ? null : charted?.[0]);
+  if (!reference) return null;
+  // The line starts at the reference close and runs through everything since.
+  const since = (bars) => (bars ?? []).filter((bar) => barDate(bar) > barDate(reference));
+  let line = since(charted);
+  let step = spec.chart;
+  // Some instruments have no hourly bars; draw their five days from daily closes.
+  if (step === 'hour' && line.length < 2) { line = since(daily); step = 'day'; }
+  const series = thin([reference, ...line]);
+  return { spark: { t: series.map((bar) => bar[0]), c: series.map((bar) => bar[1]), base: reference[1], step }, from: start?.[1] ?? null };
+}
+
 async function loadRange(range) {
   const spec = RANGES[range];
   const [daily, weekly, charted] = await Promise.all([
@@ -576,22 +715,37 @@ async function loadRange(range) {
   const sparks = {};
   for (const symbol of SYMBOLS) {
     const session = sessionOf(lastQuotes[symbol], daily.value[symbol]);
-    // Where the history is shorter than the period, the line starts at the
-    // first bar there is. (The change over the period is a separate matter:
-    // see loadBases, which reports none in that case.)
-    const reference = referenceBar(spec, session, weekly?.value[symbol])
-      ?? (spec.sessions ? null : charted.value[symbol]?.[0]);
-    if (!reference) continue;
-    // The line starts at the reference close and runs through everything since.
-    const since = (bars) => (bars ?? []).filter((bar) => barDate(bar) > barDate(reference));
-    let line = since(charted.value[symbol]);
-    let step = spec.chart;
-    // Some instruments have no hourly bars; draw their five days from daily closes.
-    if (step === 'hour' && line.length < 2) { line = since(daily.value[symbol]); step = 'day'; }
-    const series = thin([reference, ...line]);
-    sparks[symbol] = { t: series.map((bar) => bar[0]), c: series.map((bar) => bar[1]), base: reference[1], step };
+    const line = lineFor(spec, session, daily.value[symbol], weekly?.value[symbol], charted.value[symbol]);
+    if (line) sparks[symbol] = line.spark;
   }
   return { value: sparks, at: charted.at, error: charted.error || daily.error || weekly?.error || null };
+}
+
+// The same for one constituent of an index, for the chart in its company
+// panel: its line over a period and the close that period is measured from.
+// Fetched when the chart is asked for and kept as long as the intraday lines.
+const chartOf = keyed(SPARK_TTL_MS, async (indexSymbol, symbol, range) => {
+  const spec = RANGES[range];
+  if (!spec) return { spark: await intraday(symbol), from: null };
+  // The quote is looked up on every load: the session it belongs to moves on
+  // from day to day, and the period is counted back from it.
+  const { quote } = await constituent(indexSymbol, symbol);
+  const source = HISTORY[spec.chart];
+  const [daily, charted] = await Promise.all([
+    loadBars(symbol, HISTORY.day.interval, HISTORY.day.daysBack),
+    spec.chart === 'day' ? null : loadBars(symbol, source.interval, source.daysBack),
+  ]);
+  // An empty answer is the feed struggling (see the history loaders): better
+  // no chart now and another try than a blank one kept for minutes.
+  if (!daily.length || (spec.chart === 'week' && !charted.length)) throw new Error('no chart history just now');
+  const line = lineFor(spec, sessionOf(quote, daily), daily, spec.chart === 'week' ? charted : null, charted ?? daily);
+  return line ?? { spark: null, from: null };
+});
+
+async function getChart(indexSymbol, symbol, range) {
+  await constituent(indexSymbol, symbol); // only an index's own constituents are charted
+  const period = RANGES[range] ? range : '1d';
+  return chartOf(`${indexSymbol}|${symbol}|${period}`, indexSymbol, symbol, period);
 }
 
 // The closing level each period is measured from, for every row: what the
@@ -608,7 +762,9 @@ async function loadBases() {
     }
   }
   const incomplete = Boolean(daily.value[INCOMPLETE] || weekly.value[INCOMPLETE]);
-  return { value: bases, at: Math.min(daily.at, weekly.at), error: daily.error || weekly.error, incomplete };
+  // Rows whose history is another source's for now, and which one.
+  const backup = Object.fromEntries(SYMBOLS.map((symbol) => [symbol, daily.value[symbol]?.source ?? weekly.value[symbol]?.source]).filter(([, source]) => source));
+  return { value: bases, at: Math.min(daily.at, weekly.at), error: daily.error || weekly.error, incomplete, backup };
 }
 
 // Fetches every period's history once at start-up, one bar size at a time, so
@@ -634,8 +790,8 @@ function sendJson(res, status, body) {
 
 async function sendData(res, key, get) {
   try {
-    const { value, at, error, incomplete } = await get();
-    sendJson(res, 200, { [key]: value, fetchedAt: at, error, incomplete: incomplete || Boolean(value?.[INCOMPLETE]) });
+    const { value, at, error, incomplete, ...more } = await get();
+    sendJson(res, 200, { [key]: value, fetchedAt: at, error, incomplete: incomplete || Boolean(value?.[INCOMPLETE]), ...more });
   } catch (err) {
     sendJson(res, 502, { error: err.message });
   }
@@ -659,6 +815,8 @@ http
     if (pathname === '/api/config') return sendJson(res, 200, { sections: SECTIONS, markets: MARKETS, overview: OVERVIEW });
     if (pathname === '/api/quotes') return sendData(res, 'quotes', getQuotes);
     if (pathname === '/api/index') return sendData(res, 'detail', () => getIndexDetail(searchParams.get('symbol'), searchParams.get('range')));
+    if (pathname === '/api/company') return sendData(res, 'company', () => getCompany(searchParams.get('index'), searchParams.get('symbol')));
+    if (pathname === '/api/chart') return sendData(res, 'chart', () => getChart(searchParams.get('index'), searchParams.get('symbol'), searchParams.get('range')));
     if (pathname === '/api/bases') return sendData(res, 'bases', loadBases);
     if (pathname === '/api/sparks') return sendData(res, 'sparks', () => getSparks(searchParams.get('range')));
     return sendStatic(res, decodeURIComponent(pathname));

@@ -1,8 +1,9 @@
 // The panel that opens when a row or tile is clicked: the instrument's own
-// figures, its change over every period, a larger chart whose period can be
-// chosen and, for an index whose weights are available, what its
-// constituents did in the latest session.
-import { lineSvg, plotLine, pointLabel } from './chart.js';
+// figures, a larger chart whose period can be chosen, with the change over
+// that period, and, for an index whose weights are available, what its
+// constituents did over it.
+import { openCompany } from './company.js';
+import { chartFigure } from './figure.js';
 import { changeText, lineView, PERIOD_NAME, PERIOD_SHORT, PERIODS } from './periods.js';
 import { $, el, fmt, getJson, signed, timeLabel } from './util.js';
 
@@ -12,14 +13,14 @@ const LINES_TTL_MS = 180_000;
 const FIRST_CHART = { short: '1d', long: '6m' };
 const MOVERS_SHOWN = 8;
 const ROWS_SHOWN = 25;
-const CHART = { h: 170, pad: 10 };
 
 // The rev counter sweeps 240 degrees, from the 52-week low to the high.
 const TACH_SWEEP = 240;
 const TACH_REDLINE = 0.85;
 
 const dialog = $('#detail');
-const chart = lineSvg('spark big');
+// The chart's own period buttons, independent of the dashboard's view.
+const figure = chartFigure($('.d-chart', dialog), (period) => { if (open) showChart(period); });
 const tach = buildTach();
 let getContext = () => ({});
 let open = null; // the instrument on show: { item, period, details (by period), error, sort, showAll }
@@ -74,7 +75,6 @@ function renderTach(q) {
 
 export function initDetail(context) {
   getContext = context;
-  $('.d-plot', dialog).prepend(chart);
   $('.d-tach', dialog).append(tach);
   $('#detail-close').addEventListener('click', () => dialog.close());
   // A click on the backdrop lands on the dialog element itself.
@@ -87,33 +87,25 @@ export function initDetail(context) {
     dropLoading();
     open = null;
   });
-  new ResizeObserver(() => renderDetail()).observe($('.d-plot', dialog));
-
-  // The chart's own period buttons, independent of the dashboard's view.
-  const periods = $('#chart-periods');
-  for (const period of PERIODS) periods.append(el('button', { type: 'button', 'data-period': period, 'aria-pressed': 'false', title: PERIOD_NAME[period], text: PERIOD_SHORT[period] }));
-  periods.addEventListener('click', (event) => {
-    const period = event.target.closest('button')?.dataset.period;
-    if (period && open) showChart(period);
-  });
+  new ResizeObserver(() => renderDetail()).observe(figure.plot);
 }
 
 // Switches the panel to a period: the chart, and what the constituents did
 // over it. Fetches whichever of the two is not at hand.
 async function showChart(period) {
   open.period = period;
-  for (const button of document.querySelectorAll('#chart-periods button')) button.setAttribute('aria-pressed', String(button.dataset.period === period));
+  figure.select(period);
   renderDetail();
   renderConstituents();
   if (open.item.holdings) loadConstituents();
   if (Date.now() - (lines.get(period)?.at ?? 0) < LINES_TTL_MS) return;
-  $('.d-plot', dialog).classList.add('loading');
+  figure.loading(true);
   try {
     lines.set(period, { at: Date.now(), sparks: (await getJson(`/api/sparks?range=${period}`)).sparks });
   } catch {
     // The chart area says there is no data; the figures above it are unaffected.
   }
-  $('.d-plot', dialog).classList.remove('loading');
+  figure.loading(false);
   renderDetail();
 }
 
@@ -208,15 +200,15 @@ export function renderDetail() {
   $('.d-stats', dialog).replaceChildren(...stats);
   renderTach(q);
 
-  const plot = $('.d-plot', dialog);
-  const view = lineView(open.period, lines.get(open.period)?.sparks[open.item.symbol], q, fetchedAt);
-  const drawn = plotLine(chart, { ...view, dp: q.dp }, { w: Math.max(240, plot.clientWidth), ...CHART });
-  chart.setAttribute('aria-label', `${open.item.name || open.item.symbol}, ${PERIOD_NAME[open.period]} chart`);
-  $('.d-chart figcaption', dialog).textContent = drawn ? `Price, ${PERIOD_NAME[open.period].toLowerCase()}` : 'No chart data for this period';
-  $('.d-hi', dialog).textContent = drawn ? fmt(drawn.hi, q.dp) : '';
-  $('.d-lo', dialog).textContent = drawn ? fmt(drawn.lo, q.dp) : '';
-  $('.d-from', dialog).textContent = drawn ? pointLabel(view.t[0], view.step) : '';
-  $('.d-to', dialog).textContent = drawn ? pointLabel(view.t.at(-1), view.step) : '';
+  figure.draw({
+    view: lineView(open.period, lines.get(open.period)?.sparks[open.item.symbol], q, fetchedAt),
+    period: open.period,
+    name: open.item.name || open.item.symbol,
+    dp: q.dp,
+    // The change over the period on show, stated beside the chart.
+    change: changes[PERIODS.indexOf(open.period)],
+    isYield,
+  });
 }
 
 // ---- its constituents -------------------------------------------------------
@@ -265,6 +257,16 @@ function analyse(detail) {
 // Percentage points, with fewer decimals as the figure grows.
 const points = (value) => `${signed(value, Math.abs(value ?? 0) >= 10 ? 1 : Math.abs(value ?? 0) >= 1 ? 2 : 3).text} pp`;
 
+// A constituent's name. With a quote behind it, it is a button that opens the
+// company's own panel; without one there is nothing to open.
+function companyLink(r, tag) {
+  if (r.last == null || !r.symbol) return el(tag, { class: 'nm', text: r.name });
+  const index = open.item;
+  const button = el('button', { type: 'button', class: 'nm co', title: `${r.name}: key figures and financial statements`, text: r.name });
+  button.addEventListener('click', () => openCompany(index, r, open?.period));
+  return button;
+}
+
 function moverList(title, rows, scale) {
   const list = el('ol', { class: 'movers' });
   for (const r of rows) {
@@ -272,7 +274,7 @@ function moverList(title, rows, scale) {
     const bar = el('i', { class: r.contribution > 0 ? 'up' : 'down' });
     bar.style.width = `${Math.max(1.5, (Math.abs(r.contribution) / scale) * 100)}%`;
     list.append(el('li', {},
-      el('span', { class: 'mv-name' }, el('b', { text: r.name }), el('small', { text: `${r.ticker} · ${fmt(r.weight, 2)}% of index` })),
+      el('span', { class: 'mv-name' }, companyLink(r, 'b'), el('small', { text: `${r.ticker} · ${fmt(r.weight, 2)}% of index` })),
       el('span', { class: `mv-chg ${chg.dir}`, text: chg.text }),
       el('span', { class: 'mv-bar' }, bar),
       el('span', { class: 'mv-val', text: points(r.contribution) }),
@@ -338,7 +340,7 @@ function constituentTable(d) {
   for (const r of shown) {
     const chg = changeText(r.changePct, false);
     body.append(el('tr', {},
-      el('th', { scope: 'row' }, el('span', { class: 'nm', text: r.name }), el('span', { class: 'sub', text: r.ticker })),
+      el('th', { scope: 'row' }, companyLink(r, 'span'), el('span', { class: 'sub', text: r.ticker })),
       el('td', { class: 'd-sector', text: r.sector }),
       el('td', { text: `${fmt(r.weight, 2)}%` }),
       el('td', { class: 'd-last', text: r.last == null ? '—' : fmt(r.last, r.dp) }),
