@@ -22,8 +22,8 @@ export function store(key, value) {
   return null;
 }
 
-export async function getJson(url) {
-  const res = await fetch(url, { cache: 'no-store' });
+export async function getJson(url, signal) {
+  const res = await fetch(url, { cache: 'no-store', signal });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
   return body;
