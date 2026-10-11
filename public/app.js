@@ -17,7 +17,7 @@ const REV_FULL = { '1d': 2, '6m': 25 };
 // `mode` is the view (short or long term). `sparks` are the trend lines for
 // `sparksFor`, the line period of the view they were loaded for. `bases` are
 // the closing levels every period is measured from.
-const state = { config: null, quotes: {}, sparks: {}, sparksFor: null, bases: {}, mode: 'short', lineRequest: 0, fetchedAt: null, intervalMs: 30_000, timer: null };
+const state = { config: null, quotes: {}, sparks: {}, sparksFor: null, bases: {}, basesIncomplete: false, mode: 'short', lineRequest: 0, fetchedAt: null, intervalMs: 30_000, timer: null };
 
 function duration(minutes) {
   const m = Math.max(0, Math.round(minutes));
@@ -475,10 +475,14 @@ function showMode(mode) {
 async function refreshBases() {
   try {
     const data = await getJson('/api/bases');
+    const filling = state.basesIncomplete;
     state.bases = data.bases;
+    state.basesIncomplete = data.incomplete;
     render();
-    // Some history failed to load (the network was not ready, say): the
-    // server is filling the gaps, so ask again shortly.
+    // Some history failed to load (the network was not ready, or the feed
+    // answered with nothing): the server is filling the gaps, so ask again
+    // shortly, and fetch the trend lines of the rows that have just been filled.
+    if (filling) loadLines({ quiet: true });
     if (data.incomplete) setTimeout(refreshBases, BASES_RETRY_MS);
   } catch {
     if (!state.bases['1w']) setTimeout(refreshBases, BASES_RETRY_MS);

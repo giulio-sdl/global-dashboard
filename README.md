@@ -127,6 +127,12 @@ more than 2.5 seconds returns the previous figures while it finishes in the back
 comes back incomplete (the 07:30 job can start the server before the network is up after the Mac wakes) is
 retried after 20 seconds rather than kept for its usual cache time.
 
+On some days the history service answers a good share of requests with no bars at all (one Sunday morning,
+between a sixth and a third of them). An empty answer is therefore treated as a failed request, not as an
+instrument without history: the missing symbols alone are asked for again after 20 seconds, and the wait
+doubles each time while the very same symbols keep failing, so one that truly has no data is not asked for
+endlessly.
+
 For three S&P crypto indexes the feed rounds its own percentage change to one decimal (-2.70% for a fall of
 2.76%). Where the feed's percentage is further from the one its price and change imply than rounding can
 explain, the implied one is shown.
