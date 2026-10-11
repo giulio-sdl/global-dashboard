@@ -187,12 +187,6 @@ export function renderDetail() {
   $('.d-stats', dialog).replaceChildren(...stats);
   renderTach(q);
 
-  // The change over every period, short term to long term.
-  $('.d-perf', dialog).replaceChildren(...PERIODS.map((period, i) => {
-    const { text, dir } = changeText(changes[i], isYield);
-    return el('div', {}, el('dt', { text: PERIOD_SHORT[period] }), el('dd', { class: dir, text }));
-  }));
-
   const plot = $('.d-plot', dialog);
   const view = lineView(open.period, lines.get(open.period)?.sparks[open.item.symbol], q, fetchedAt);
   const drawn = plotLine(chart, { ...view, dp: q.dp }, { w: Math.max(240, plot.clientWidth), ...CHART });

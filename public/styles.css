@@ -624,9 +624,6 @@ dialog.detail h2::before, dialog.detail h2::after { content: none; }
 }
 
 /* The change over each of the eight periods, in one row. */
-.d-perf { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 6px; margin: 0 0 16px; padding: 10px 0; border-block: 1px solid var(--grid); }
-.d-perf dt { color: var(--muted); font: italic 700 12px/1.3 var(--display); letter-spacing: 0.07em; }
-.d-perf dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .d-chart { margin: 0 0 8px; }
 .d-chart-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
 .d-chart figcaption { color: var(--ink-2); font: italic 700 13px/1.3 var(--display); letter-spacing: 0.07em; text-transform: uppercase; }
@@ -700,9 +697,6 @@ dialog.detail h3 { margin: 24px 0 2px; font-size: 18px; }
   .d-table .d-sector, .d-table .d-last { display: none; }
   .d-table th, .d-table td { width: 84px; }
 }
-@container (max-width: 640px) {
-  .d-perf { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-}
 @container (max-width: 560px) {
   .d-overview { grid-template-columns: minmax(0, 1fr); }
   .tach { width: 150px; height: 150px; margin: 0 auto; }
@@ -710,6 +704,9 @@ dialog.detail h3 { margin: 24px 0 2px; font-size: 18px; }
 @container (max-width: 460px) {
   .movers li { grid-template-columns: minmax(0, 1fr) 58px 76px; }
   .movers .mv-bar { display: none; }
+  /* Eight period buttons share the width, so the last is not cut off. */
+  .d-chart .ranges { width: 100%; }
+  .d-chart .ranges button { min-width: 0; padding: 0 2px; }
 }
 
 /* ---- footer: a chequered strip, then the small print ---- */
