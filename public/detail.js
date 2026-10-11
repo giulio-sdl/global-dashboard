@@ -84,6 +84,7 @@ export function initDetail(context) {
     // may already have been opened, and its state must be left alone.
     if (dialog.open) return;
     clearInterval(timer);
+    dropLoading();
     open = null;
   });
   new ResizeObserver(() => renderDetail()).observe($('.d-plot', dialog));
@@ -122,23 +123,43 @@ export function openDetail(item) {
   dialog.showModal();
   dialog.scrollTop = 0;
   clearInterval(timer);
+  dropLoading();
   showChart(FIRST_CHART[getContext(item).mode]);
   // Keeps the constituents of the period on show up to date.
   if (item.holdings) timer = setInterval(loadConstituents, REFRESH_MS);
+}
+
+// The request for constituents that is on its way, if any. A long period over
+// a big index is hundreds of price lookups on the server, and slow when the
+// feed is. A request the reader has moved on from is dropped, or a few of
+// them would use up the browser's connections and hold up everything else
+// the page asks for. The server finishes and keeps the result all the same.
+let loading = null; // { key, controller }
+
+function dropLoading() {
+  loading?.controller.abort();
+  loading = null;
 }
 
 // Fetches the constituents' moves over the period on show.
 async function loadConstituents() {
   const shown = open;
   const period = shown.period;
+  const key = `${shown.item.symbol}|${period}`;
+  if (loading?.key === key) return; // the timer came round while a slow one is still loading
+  dropLoading();
+  const mine = { key, controller: new AbortController() };
+  loading = mine;
   try {
-    const { detail } = await getJson(`/api/index?symbol=${encodeURIComponent(shown.item.symbol)}&range=${period}`);
+    const { detail } = await getJson(`/api/index?symbol=${encodeURIComponent(shown.item.symbol)}&range=${period}`, mine.controller.signal);
     if (open !== shown) return;
     shown.details[period] = analyse(detail);
     shown.error = null;
   } catch (err) {
-    if (open !== shown) return;
+    if (mine.controller.signal.aborted || open !== shown) return;
     shown.error = err.message;
+  } finally {
+    if (loading === mine) loading = null;
   }
   renderDetail();
   renderConstituents();
@@ -186,12 +207,6 @@ export function renderDetail() {
   }
   $('.d-stats', dialog).replaceChildren(...stats);
   renderTach(q);
-
-  // The change over every period, short term to long term.
-  $('.d-perf', dialog).replaceChildren(...PERIODS.map((period, i) => {
-    const { text, dir } = changeText(changes[i], isYield);
-    return el('div', {}, el('dt', { text: PERIOD_SHORT[period] }), el('dd', { class: dir, text }));
-  }));
 
   const plot = $('.d-plot', dialog);
   const view = lineView(open.period, lines.get(open.period)?.sparks[open.item.symbol], q, fetchedAt);

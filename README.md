@@ -49,8 +49,8 @@ and every visitor's refreshes go to the data feeds through the one server.
   it is empty until the instrument has traded after the close. The `proxy` of each index is set in
   [instruments.js](instruments.js): futures for the US indexes and the Nikkei, ETFs for the rest. ETFs are in
   US dollars, so their figure includes currency moves.
-- **Detail panel**: click any row or tile to open a panel with its key figures, its change over all eight
-  periods, and a larger chart with its own period buttons. For 11 of the 17 indexes it also shows the
+- **Detail panel**: click any row or tile to open a panel with its key figures and a larger chart with its
+  own period buttons, from one day to ten years. For 11 of the 17 indexes it also shows the
   constituents over the period selected there: which ones lifted or dragged the index most, the same by sector,
   and a sortable table of every constituent with its weight.
 - **How constituent contributions are worked out**: a name's contribution is its weight at the start of the
@@ -74,7 +74,7 @@ and every visitor's refreshes go to the data feeds through the one server.
 - **Short term / Long term**: the switch at the top right sets which four changes every table and tile
   shows. Short term is 1 day, 5 days, 1 month and 3 months, with a 3-month trend line; long term is 6 months,
   1 year, 5 years and 10 years, with a 10-year line (or as much history as there is). Yields show the same
-  periods in basis points. The detail panel always lists all eight and has its own chart period buttons.
+  periods in basis points. The detail panel's chart has its own period buttons for all eight.
 - **How periods are measured**: always from a closing level, counted back from the instrument's latest
   session. Five days is the close five sessions earlier; months and years are the last close on or before the
   same date that long ago (the last weekly close for 5Y and 10Y). Futures use the continuous front-month
@@ -126,6 +126,12 @@ taken from the daily closes. And it is sometimes slow, most of all around the US
 more than 2.5 seconds returns the previous figures while it finishes in the background. A history load that
 comes back incomplete (the 07:30 job can start the server before the network is up after the Mac wakes) is
 retried after 20 seconds rather than kept for its usual cache time.
+
+On some days the history service answers a good share of requests with no bars at all (one Sunday morning,
+between a sixth and a third of them). An empty answer is therefore treated as a failed request, not as an
+instrument without history: the missing symbols alone are asked for again after 20 seconds, and the wait
+doubles each time while the very same symbols keep failing, so one that truly has no data is not asked for
+endlessly.
 
 For three S&P crypto indexes the feed rounds its own percentage change to one decimal (-2.70% for a fall of
 2.76%). Where the feed's percentage is further from the one its price and change imply than rounding can

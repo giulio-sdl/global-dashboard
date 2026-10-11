@@ -52,10 +52,10 @@ async function fetchJson(url, timeoutMs = 12_000) {
   return res.json();
 }
 
-// Marks a result as missing some of its symbols, without the mark showing up
-// among its entries.
+// Marks a result as missing some of its symbols and names them, without the
+// mark showing up among its entries.
 const INCOMPLETE = Symbol('incomplete');
-const markIncomplete = (results) => Object.defineProperty(results, INCOMPLETE, { value: true });
+const markIncomplete = (results, failed) => Object.defineProperty(results, INCOMPLETE, { value: failed });
 const RETRY_INCOMPLETE_MS = 20_000;
 
 // Serves a cached value while fresh, shares one in-flight refresh between
@@ -65,24 +65,38 @@ const RETRY_INCOMPLETE_MS = 20_000;
 // that it gets the previous value, and the refresh finishes in the background.
 //
 // A load can come back incomplete (see forEachSymbol): some symbols failed,
-// typically because the network was not up yet when the computer woke. Such a
-// result is topped up with what was known before and counts as fresh for only
-// `RETRY_INCOMPLETE_MS`, so the gaps are filled on the next request instead of
-// lasting the whole cache time.
+// because the network was not up yet when the computer woke, or because the
+// feed is struggling and answers with nothing. Such a result is topped up with
+// what was known before, and `load` is called again after
+// `RETRY_INCOMPLETE_MS` with the incomplete value, so that it can ask for the
+// missing symbols alone. While the very same symbols keep failing, each wait
+// is twice the last: a symbol that has no data at all is not asked for
+// endlessly. Everything is loaded afresh once the cache time is up, as usual.
 function cached(ttlMs, load, patienceMs = 2_500) {
   let value = null;
-  let at = 0;
+  let at = 0; // when everything was last loaded
+  let retryAt = Infinity; // when an incomplete value is next topped up
+  let stuck = 0; // top-ups in a row that the same symbols failed in
   let pending = null;
-  const keep = (loaded) => {
-    const incomplete = Boolean(loaded?.[INCOMPLETE]);
-    value = incomplete && value ? markIncomplete({ ...value, ...loaded }) : loaded;
-    at = incomplete ? Date.now() - ttlMs + RETRY_INCOMPLETE_MS : Date.now();
+  const keep = (loaded, everything) => {
+    const failed = loaded?.[INCOMPLETE];
+    const before = value?.[INCOMPLETE];
+    const merged = value && (failed || !everything) ? { ...value, ...loaded } : loaded;
+    value = failed ? markIncomplete(merged, failed) : merged;
+    if (everything) at = Date.now();
+    const same = failed && before && failed.length === before.length && failed.every((symbol) => before.includes(symbol));
+    stuck = same ? stuck + 1 : 0;
+    retryAt = failed ? Date.now() + RETRY_INCOMPLETE_MS * 2 ** Math.min(stuck, 10) : Infinity;
   };
   return async () => {
-    if (value && Date.now() - at < ttlMs) return { value, at, error: null };
-    pending ??= load()
-      .then((v) => { keep(v); return null; })
-      .catch((err) => err.message || String(err))
+    const stale = !value || Date.now() - at >= ttlMs;
+    if (!stale && Date.now() < retryAt) return { value, at, error: null };
+    pending ??= load(stale ? null : value)
+      .then((v) => { keep(v, stale); return null; })
+      .catch((err) => {
+        if (!stale) retryAt = Date.now() + RETRY_INCOMPLETE_MS;
+        return err.message || String(err);
+      })
       .finally(() => { pending = null; });
     const slow = new Promise((resolve) => setTimeout(resolve, patienceMs, null));
     const error = await (value ? Promise.race([pending, slow]) : pending);
@@ -266,7 +280,7 @@ const lastLiveDetail = new Map();
 function keyed(ttlMs, load) {
   const loaders = new Map();
   return (key, ...args) => {
-    if (!loaders.has(key)) loaders.set(key, cached(ttlMs, () => load(...args)));
+    if (!loaders.has(key)) loaders.set(key, cached(ttlMs, (known) => load(...args, known)));
     return loaders.get(key)();
   };
 }
@@ -292,7 +306,7 @@ const pricedOf = keyed(CONSTITUENT_TTL_MS, async (item) => {
 // Each constituent's close at the start of a period: its last close on or
 // before the day the index's own change is measured from, so that the two
 // cover the same stretch. One small request per constituent.
-const referencesOf = keyed(REFERENCE_TTL_MS, async (item, range) => {
+const referencesOf = keyed(REFERENCE_TTL_MS, async (item, range, known) => {
   const spec = RANGES[range];
   const [{ value: priced }, daily] = await Promise.all([pricedOf(item.symbol, item), HISTORY.day.get().catch(() => null)]);
   const session = sessionOf(lastQuotes[item.symbol], daily?.value[item.symbol]);
@@ -302,9 +316,14 @@ const referencesOf = keyed(REFERENCE_TTL_MS, async (item, range) => {
     : Date.parse(monthsBefore(session.date, spec.months));
   const target = barDate([start]);
   return forEachSymbol(async (symbol) => {
-    const bars = await loadBarsBetween(symbol, '1D', start - 12 * DAY_MS, start + 2 * DAY_MS);
+    // The feed repeats an empty answer to a request it has just been sent, so
+    // the end of the window moves by up to a minute to make each one new.
+    const bars = await loadBarsBetween(symbol, '1D', start - 12 * DAY_MS, start + 2 * DAY_MS + (Date.now() % 60_000));
+    // No bars is either the feed struggling or a share that did not trade
+    // yet; it cannot be told which, so it is asked for again a few times.
+    if (!bars.length) throw new Error('no bars');
     return bars.filter((bar) => barDate(bar) <= target).at(-1)?.[1];
-  }, priced.rows.filter((row) => row.quote).map((row) => row.symbol), REFERENCE_CONCURRENCY);
+  }, priced.rows.filter((row) => row.quote).map((row) => row.symbol), REFERENCE_CONCURRENCY, known);
 });
 
 // How many times over a share price can believably have multiplied in each
@@ -346,7 +365,7 @@ async function getIndexDetail(symbol, range) {
       };
     }),
   };
-  const result = (value) => ({ value, at: priced.at, error: priced.error });
+  const result = (value) => ({ value, at: priced.at, error: priced.error, incomplete: Boolean(references?.[INCOMPLETE]) });
   if (period !== '1d') return result(detail);
 
   // Before the open the feed has cleared every constituent's change. Serve
@@ -418,9 +437,11 @@ async function loadSpark(symbol) {
 }
 
 // Runs `load` for every symbol, a few at a time, and keeps what succeeds.
-// Symbols that fail get one more try; if any still fail the result is marked
-// incomplete, so it is not mistaken for the full picture.
-async function forEachSymbol(load, symbols = SYMBOLS, concurrency = SPARK_CONCURRENCY) {
+// Runs `load` for every symbol, a few at a time. Symbols that fail get one
+// more try; if any still fail the result names them, so it is not mistaken for
+// the full picture. Given an earlier result that was incomplete (`known`),
+// only the symbols it lacks are asked for.
+async function forEachSymbol(load, symbols = SYMBOLS, concurrency = SPARK_CONCURRENCY, known = null) {
   const results = {};
   const run = async (list) => {
     const queue = [...list];
@@ -437,9 +458,9 @@ async function forEachSymbol(load, symbols = SYMBOLS, concurrency = SPARK_CONCUR
     }));
     return failed;
   };
-  const failed = await run(await run(symbols));
-  if (symbols.length && failed.length === symbols.length) throw new Error('chart feed unavailable');
-  return failed.length ? markIncomplete(results) : results;
+  const failed = await run(await run(known?.[INCOMPLETE] ?? symbols));
+  if (!known && symbols.length && failed.length === symbols.length) throw new Error('chart feed unavailable');
+  return failed.length ? markIncomplete(results, failed) : results;
 }
 
 const getProxyBars = cached(SPARK_TTL_MS, () => forEachSymbol((symbol) => loadBars(symbol, '10M', PROXY_DAYS_BACK), PROXY_SYMBOLS));
@@ -454,10 +475,17 @@ const HISTORY = {
   week: { interval: '1W', daysBack: 3700, ttlMs: 6 * 3600_000 },
 };
 for (const source of Object.values(HISTORY)) {
-  source.get = cached(source.ttlMs, () => forEachSymbol(async (symbol) => {
+  // When the feed is struggling it answers some requests with no bars at all.
+  // That is not the same as an instrument having none: every one has daily
+  // and weekly bars, and hourly ones if it has had them before. So an empty
+  // answer counts as a failed request and is asked for again.
+  const charted = new Set();
+  source.get = cached(source.ttlMs, (known) => forEachSymbol(async (symbol) => {
     const bars = await loadBars(CHART_SYMBOL.get(symbol), source.interval, source.daysBack);
+    if (bars.length) charted.add(symbol);
+    else if (source !== HISTORY.hour || charted.has(symbol)) throw new Error('no bars');
     return bars.length ? bars : null;
-  }));
+  }, SYMBOLS, SPARK_CONCURRENCY, known));
 }
 
 // Every period is measured from a closing level, counted back from the
