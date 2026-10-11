@@ -50,9 +50,13 @@ and every visitor's refreshes go to the data feeds through the one server.
   [instruments.js](instruments.js): futures for the US indexes and the Nikkei, ETFs for the rest. ETFs are in
   US dollars, so their figure includes currency moves.
 - **Detail panel**: click any row or tile to open a panel with its key figures and a larger chart with its
-  own period buttons, from one day to ten years. For 11 of the 17 indexes it also shows the
+  own period buttons, from one day to ten years. Beside the chart's caption is the change over the period
+  selected. For 11 of the 17 indexes it also shows the
   constituents over the period selected there: which ones lifted or dragged the index most, the same by sector,
   and a sortable table of every constituent with its weight.
+- **Company panel**: click a company's name in an index's panel for its price chart (the same eight periods,
+  each with its change), its key figures and its financial statements by year and by quarter (see SEC EDGAR
+  below). It opens on the period the index panel was showing. "Back" returns to the index.
 - **How constituent contributions are worked out**: a name's contribution is its weight at the start of the
   period times its price change. Only today's weights are known, so the starting weight is worked back from
   them, and the contributions add up to the move of the whole basket. Beyond one day each constituent needs
@@ -106,12 +110,61 @@ Edit [instruments.js](instruments.js) and restart. Symbols are CNBC quote symbol
 `.SPX` style for cash indexes, `@CL.1` style for front-month futures, plain tickers for US-listed securities,
 `EUR=` / `EURCHF=` style for currency pairs, and `BTC.CM=` style for crypto.
 
-## Data source
+## Data sources
+
+The preferred order is Yahoo Finance, then CNBC, FRED and SEC EDGAR. In practice:
+
+| Source | Used for | Notes |
+|---|---|---|
+| Yahoo Finance | Nothing | Its data service turns programs away (HTTP 429) while answering a browser on the same computer, and it does not let another site's page read it. Using it would mean disguising the server as a browser, which this project does not do. |
+| CNBC quote feed | Every live price, every chart and every change over a period; each company's key figures | The working first source. No key needed. |
+| FRED | Treasury yield history, when CNBC has none | Official daily yields from the St. Louis Fed. See [fred.js](fred.js). |
+| SEC EDGAR | Company financial statements | As filed by the company. See [edgar.js](edgar.js). |
+| iShares | Index constituents and weights | Daily holdings files. See [holdings.js](holdings.js). |
+
+### CNBC
 
 Quotes and intraday bars come from CNBC's public quote feed, proxied and cached by [server.js](server.js)
 (quotes 10 s, intraday charts 3 min, longer history 10 min to 6 h). It needs no API key. US cash indexes, ETFs and currencies are real-time; other indexes,
-futures and commodities are delayed by roughly 10–20 minutes. Yahoo Finance was tried first but rate-limits
-unauthenticated requests (HTTP 429).
+futures and commodities are delayed by roughly 10–20 minutes.
+
+### FRED
+
+Each Treasury yield names its official series in [instruments.js](instruments.js) (`fred: 'DGS10'`). When CNBC
+has had no daily or weekly history for a yield for 12 hours, FRED's series stands in: the 5-day to 10-year
+changes and the trend lines are drawn from it, the row says "history: FRED", and CNBC goes on being asked.
+Live yields always come from CNBC, because FRED is end-of-day and a business day behind. The day FRED still
+lacks is filled with the close the live quote's own change is measured from, so that five sessions back is
+counted correctly; after a market holiday that adds a day that did not trade, and the five days start one
+session late. The stand-in also works when CNBC's history is down for everything.
+
+The two are not quite the same figure. FRED quotes the yield of a constant maturity, CNBC that of the latest
+bill or bond sold. For a 10-year they are within a couple of basis points; for a 3-month bill they can be
+five to ten apart, which shows in a change measured from one to the other.
+
+### SEC EDGAR
+
+Clicking a company in an index's panel opens the company's own panel. Its key figures (market cap, P/E,
+dividend, margins and so on) come with its quote from CNBC. Its financial statements come from EDGAR, the
+SEC's filing database: revenue, profit, earnings per share, cash flow and the balance sheet for the last five
+fiscal years and six quarters, as the company filed them.
+
+- **Coverage**: companies registered with the SEC. That is every US-listed company, and foreign ones that file
+  there (Novartis, SAP, Toyota), which report once a year. A company listed only abroad (Nestlé, Roche) has
+  no statements, and the panel says so. A US share is found by its ticker; a foreign one only by its exact
+  name, because a home ticker can be someone else's in New York.
+- **Quarters by subtraction**: companies file cash flow only as a running total for the year, and never file
+  a fourth quarter on its own. Those quarters are the running total less the one before.
+- **Once a quarter**: a company's statements are fetched when its panel is first opened, kept in `.cache/edgar`,
+  and fetched again when that copy is a quarter old, or weekly once the next report is overdue.
+- **Contact address**: the SEC asks every program to name a contact and stay under ten requests a second.
+  Put the address in `settings.local.json` next to `server.js`, as `{ "secContact": "you@example.com" }`, or in
+  the `SEC_CONTACT` environment variable on a hosting service. The file is not in the repository. Without an
+  address nothing is requested and the panel shows key figures only.
+- **Known gap**: a company that has reorganised under a new registration (a new holding company, say) starts
+  again with only the reports filed since.
+
+### iShares
 
 Index weights are not published by any free quote feed, so [holdings.js](holdings.js) reads them from the daily
 holdings file of an iShares ETF tracking each index (ishares.com/ch), cached for 12 hours, and prices the

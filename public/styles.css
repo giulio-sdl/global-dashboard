@@ -627,6 +627,8 @@ dialog.detail h2::before, dialog.detail h2::after { content: none; }
 .d-chart { margin: 0 0 8px; }
 .d-chart-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
 .d-chart figcaption { color: var(--ink-2); font: italic 700 13px/1.3 var(--display); letter-spacing: 0.07em; text-transform: uppercase; }
+/* The change over the period on show. */
+.d-chart figcaption .chip { margin-left: 10px; font: 700 16px/1.3 var(--digits); letter-spacing: 0; text-transform: none; }
 dialog.detail h4 { color: var(--ink-2); font-size: 13px; letter-spacing: 0.07em; }
 /* Faint vertical rules behind the chart, as on a telemetry trace. */
 .d-plot {
@@ -704,10 +706,48 @@ dialog.detail h3 { margin: 24px 0 2px; font-size: 18px; }
 @container (max-width: 460px) {
   .movers li { grid-template-columns: minmax(0, 1fr) 58px 76px; }
   .movers .mv-bar { display: none; }
+  .c-wide { display: none; }
   /* Eight period buttons share the width, so the last is not cut off. */
   .d-chart .ranges { width: 100%; }
   .d-chart .ranges button { min-width: 0; padding: 0 2px; }
 }
+
+/* ---- company panel: a constituent's key figures and its statements at the SEC ---- */
+
+/* A constituent's name, where it opens the company's panel. */
+button.co {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+button.co:hover, button.co:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
+
+#c-body > h3:first-child { margin-top: 4px; }
+#c-body .d-stats { margin: 8px 0 6px; }
+.c-head { display: flex; justify-content: flex-end; margin: 6px 0 2px; }
+/* A column per period: on a narrow screen the table scrolls and the line names stay put. */
+.c-scroll { overflow-x: auto; }
+.c-table { min-width: calc(190px + var(--cols, 5) * 92px); margin: 0 0 10px; }
+.c-table th:first-child { position: sticky; left: 0; width: auto; background: var(--surface); }
+.c-table thead th, .c-table td { width: 92px; }
+.c-table tbody th, .c-table tbody td { height: 32px; }
+.c-table tbody tr:hover > th:first-child { background: var(--surface); }
+.c-table .c-group th { height: 34px; padding-top: 12px; color: var(--ink-2); font: italic 700 12px/1.3 var(--display); letter-spacing: 0.07em; text-transform: uppercase; }
+.c-table .c-group:hover > * { background: var(--surface); }
+/* Margins are read off the lines above them. */
+.c-table .c-ratio > * { color: var(--ink-2); font-size: 13px; }
+.c-table .c-ratio th { padding-left: 14px; }
+#c-body a { color: inherit; text-underline-offset: 3px; }
 
 /* ---- footer: a chequered strip, then the small print ---- */
 

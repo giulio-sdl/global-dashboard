@@ -109,6 +109,26 @@
     <div id="d-constituents"></div>
   </dialog>
 
+  <dialog id="company" class="detail" aria-labelledby="company-title">
+    <header class="d-head">
+      <div>
+        <h2 id="company-title"></h2>
+        <p class="d-sub"></p>
+        <p class="d-quote"><span class="dq-last"></span> <span class="dq-chg"></span> <span class="dq-time"></span></p>
+      </div>
+      <button type="button" class="control" id="company-close">Back</button>
+    </header>
+    <figure class="d-chart">
+      <div class="d-chart-head">
+        <figcaption></figcaption>
+        <div class="ranges" role="group" aria-label="Chart period"></div>
+      </div>
+      <div class="d-plot"><span class="d-hi"></span><span class="d-lo"></span></div>
+      <div class="d-axis"><span class="d-from"></span><span class="d-to"></span></div>
+    </figure>
+    <div id="c-body"></div>
+  </dialog>
+
   <div id="tip" class="tip" hidden></div>
   <script type="module" src="app.js"></script>
 </body>

@@ -3,3 +3,7 @@ node_modules/
 .DS_Store
 # The morning-open schedule holds paths specific to one Mac.
 scripts/*.plist
+# Settings for this computer only (the contact address given to the SEC).
+settings.local.json
+# Company financials fetched from SEC EDGAR.
+.cache/
