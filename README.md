@@ -68,6 +68,18 @@ and every visitor's refreshes go to the data feeds through the one server.
 - **Crypto**: seven indexes (CoinDesk 20 and 5; S&P Broad Digital Market, MegaCap, ex-MegaCap, Bitcoin and
   Ethereum), and Bitcoin, Ether, XRP, BNB, Solana, Tron and Sui in US dollars. The S&P indexes have no intraday chart, and
   the three broad ones update once a day.
+- **Crypto is measured round the clock**: a share's day runs from one closing bell to the next, but crypto
+  never closes, and the feed's "previous close" for a coin is only its price at 4 p.m. in New York. So the seven
+  coins and the CoinDesk 20 are measured over exact spans, counted back from now ([rolling.js](rolling.js)):
+  the last 24 hours, the last 5 days (120 hours, weekend included), and the same day and time of day one month
+  to ten years ago. In their panel "24 hours ago" and "24-hour range" replace the previous close and day range.
+  - The price at that moment comes from ten-minute prices for the last week and hourly ones for the last three
+    months. Beyond that the feed has one close a day, so the price at that hour is placed between the closes
+    either side: from six months back the figure is an estimate, good to a fraction of that day's move.
+  - XRP, Tron and Sui are quoted from one series and charted from another, a little apart; the charted prices
+    are brought to the quote's level first, which leaves these three about a tenth of a point less exact.
+  - The CoinDesk 5 has no weekend prices on this feed and the S&P crypto indexes publish one value a day, so
+    those six stay measured from their daily closes.
 - **US bonds**: Treasury yields from 3 months to 30 years (in percent, with moves in basis points), Treasury
   futures, the MOVE volatility index, and the main bond indexes shown through the ETFs that track them, because
   the feed carries no bond index levels.

@@ -8,6 +8,7 @@ import { createEdgar } from './edgar.js';
 import { loadFredSeries, weekly as weeklyBars } from './fred.js';
 import { loadHoldings } from './holdings.js';
 import { MARKETS, OVERVIEW, SECTIONS } from './instruments.js';
+import { betweenDailyCloses, HOUR_BAR_MS, MINUTE_BAR_MS, momentBefore, priceAt, rangeSince } from './rolling.js';
 import { sinceClose } from './sinceclose.js';
 
 const PORT = Number(process.env.PORT) || 5177;
@@ -298,20 +299,38 @@ const soon = (get, ms = 1_000) => Promise.race([
   new Promise((resolve) => setTimeout(resolve, ms, null)),
 ]);
 
+// The same, falling back on what the source gave last time: a refresh in
+// progress must not make the figures built on it come and go.
+function steady(get) {
+  let last = null;
+  return async () => {
+    last = (await soon(get)) ?? last;
+    return last;
+  };
+}
+
 async function loadQuotes() {
   const fresh = await fetchQuotes([...new Set([...SYMBOLS, ...PROXY_SYMBOLS])]);
   if (!Object.keys(fresh).length) throw new Error('quote feed returned no data');
   // If a batch was lost even after the retry, its symbols keep their last quote.
   const quotes = { ...lastQuotes, ...fresh };
   lastQuotes = quotes;
+  // A round-the-clock row's change is over the last 24 hours, not from the
+  // feed's "previous close", and its range is that of the same 24 hours.
+  for (const [symbol, { refs, day }] of Object.entries(await rollingRefs())) {
+    const q = quotes[symbol];
+    const ago = refs['1d'];
+    Object.assign(q, { rolling: true, prevClose: ago, change: q.last - ago, changePct: (q.last / ago - 1) * 100 });
+    if (day) Object.assign(q, { high: Math.max(day.high, q.last), low: Math.min(day.low, q.last) });
+  }
   // Just after start-up the daily history is still loading. Do not hold the
   // first prices back for it; the next refresh applies what depends on it.
-  const history = await soon(HISTORY.day.get);
+  const history = await dailyHistory();
   if (history) {
     for (const symbol of SYMBOLS) {
       const q = quotes[symbol];
       if (!q) continue;
-      if (awaitingOpen(q)) restoreLastSession(q, history[symbol]);
+      if (!q.rolling && awaitingOpen(q)) restoreLastSession(q, history[symbol]);
       Object.assign(q, yearRange(q, history[symbol]));
     }
   }
@@ -542,6 +561,8 @@ async function forEachSymbol(load, symbols = SYMBOLS, concurrency = SPARK_CONCUR
   return failed.length ? markIncomplete(results, failed) : results;
 }
 
+const dailyHistory = steady(() => HISTORY.day.get());
+
 const getProxyBars = cached(SPARK_TTL_MS, () => forEachSymbol((symbol) => loadBars(symbol, '10M', PROXY_DAYS_BACK), PROXY_SYMBOLS));
 
 // ---- longer periods ---------------------------------------------------------
@@ -718,6 +739,10 @@ async function loadRange(range) {
     const line = lineFor(spec, session, daily.value[symbol], weekly?.value[symbol], charted.value[symbol]);
     if (line) sparks[symbol] = line.spark;
   }
+  for (const [symbol, entry] of Object.entries(await rollingRefs())) {
+    const line = rollingLine(range, entry, daily.value[symbol], weekly?.value[symbol]);
+    if (line) sparks[symbol] = line;
+  }
   return { value: sparks, at: charted.at, error: charted.error || daily.error || weekly?.error || null };
 }
 
@@ -748,6 +773,111 @@ async function getChart(indexSymbol, symbol, range) {
   return chartOf(`${indexSymbol}|${symbol}|${period}`, indexSymbol, symbol, period);
 }
 
+// ---- markets that never close -------------------------------------------------
+
+// Crypto is priced round the clock, so its periods are spans of the clock and
+// not counted from a close (see rolling.js): the last 24 hours, the last 120,
+// the same time of day so many months back. `read` is where the price at that
+// moment comes from: ten-minute bars reach a week back, hourly ones about
+// three months, and beyond that there are only daily closes to place it between.
+const ROLLING = SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) =>
+  g.items.filter((item) => item.rolling).map((item) => item.symbol))));
+const SPANS = {
+  '1d': { hours: 24, read: 'minutes' },
+  '1w': { hours: 120, read: 'minutes' },
+  '1m': { months: 1, read: 'hours' },
+  '3m': { months: 3, read: 'hours' },
+  '6m': { months: 6, read: 'days' },
+  '1y': { months: 12, read: 'days' },
+  '5y': { months: 60, read: 'years' },
+  '10y': { months: 120, read: 'years' },
+};
+const MINUTE_DAYS = 6; // five days and a margin
+const MOMENTS_TTL_MS = 10 * 60_000;
+
+// Ten-minute bars of the last six days: the prices 24 hours and 5 days ago,
+// the range of the day, and the lines since.
+//
+// A row quoted under one symbol and charted under another (XRP) has two series
+// that sit a little apart. `scale` is the quote over the newest bar as both
+// stood when the bars were fetched: it brings the charted prices to the
+// quote's level before the two are compared.
+const getMinutes = cached(SPARK_TTL_MS, (known) => forEachSymbol(async (symbol) => {
+  const bars = await loadBars(CHART_SYMBOL.get(symbol), '10M', MINUTE_DAYS);
+  if (!bars.length) throw new Error('no bars');
+  const quoted = CHART_SYMBOL.get(symbol) === symbol ? null : (await getQuotes().catch(() => null))?.value[symbol]?.last;
+  return { bars, scale: quoted ? quoted / bars.at(-1)[1] : 1 };
+}, ROLLING, SPARK_CONCURRENCY, known));
+
+// The few bars either side of the moments further back: hourly ones for one
+// and three months ago, daily ones for five and ten years ago. (Six months
+// and a year are read from the daily history every row has.)
+//
+// An empty answer is usually the feed struggling, so it counts as a failed
+// request and is asked for again. `young` says a row may truly have nothing
+// that far back (a coin under five years old): then only nothing at all does.
+function barsAround(ranges, interval, reachMs, ttlMs, young = false) {
+  return cached(ttlMs, (known) => forEachSymbol(async (symbol) => {
+    const around = {};
+    for (const range of ranges) {
+      const moment = momentBefore(Date.now(), SPANS[range]);
+      around[range] = await loadBarsBetween(CHART_SYMBOL.get(symbol), interval, Math.floor((moment - reachMs) / 3600_000) * 3600_000, moment + reachMs);
+    }
+    const empty = Object.values(around).filter((bars) => !bars.length).length;
+    if (young ? empty === ranges.length : empty > 0) throw new Error('no bars');
+    return around;
+  }, ROLLING, SPARK_CONCURRENCY, known));
+}
+// The feed reads the times it is asked for as New York time, four or five
+// hours off, so the window is a day either side and not a few hours.
+const getHoursBack = barsAround(['1m', '3m'], '1H', DAY_MS, MOMENTS_TTL_MS);
+const getYearsBack = barsAround(['5y', '10y'], '1D', 3 * DAY_MS, HISTORY.day.ttlMs, true);
+
+// For each round-the-clock row, as of this moment: its price a span ago for
+// every period (`refs`), the range of the last 24 hours (`day`), and its
+// ten-minute bars. A row whose bars are not at hand, or do not reach back 24
+// hours, is left out: it is measured from closes like the rest until they do.
+const rollingSources = [getMinutes, getHoursBack, () => HISTORY.day.get(), getYearsBack].map(steady);
+
+async function rollingRefs() {
+  const [minutes, hours, days, years] = await Promise.all(rollingSources.map((source) => source()));
+  const now = Date.now();
+  const rows = {};
+  for (const symbol of ROLLING) {
+    if (!minutes?.[symbol] || !lastQuotes[symbol]) continue;
+    const { bars, scale } = minutes[symbol];
+    const read = {
+      minutes: (moment) => priceAt(bars, MINUTE_BAR_MS, moment),
+      hours: (moment, range) => priceAt(hours?.[symbol]?.[range], HOUR_BAR_MS, moment),
+      days: (moment) => betweenDailyCloses(days?.[symbol], moment),
+      years: (moment, range) => betweenDailyCloses(years?.[symbol]?.[range], moment),
+    };
+    const refs = {};
+    for (const [range, span] of Object.entries(SPANS)) {
+      const price = read[span.read](momentBefore(now, span), range);
+      if (price != null) refs[range] = price * scale;
+    }
+    if (refs['1d'] == null) continue;
+    const day = rangeSince(bars, MINUTE_BAR_MS, momentBefore(now, SPANS['1d']));
+    rows[symbol] = { refs, bars, scale, now, day: day && { high: day.high * scale, low: day.low * scale } };
+  }
+  return rows;
+}
+
+// A round-the-clock row's line over a period: from its price a span ago
+// through every bar that has ended since. Null when that price is not known.
+function rollingLine(range, { refs, bars, scale, now }, daily, weekly) {
+  if (refs[range] == null) return null;
+  const moment = momentBefore(now, SPANS[range]);
+  // Each bar is placed where it ends: a daily one at its 4 p.m. New York close, a weekly one at Friday's.
+  const [source, endsAfterMs, step] = SPANS[range].read === 'minutes' ? [bars, MINUTE_BAR_MS, range === '1d' ? undefined : 'hour']
+    : RANGES[range].chart === 'week' ? [weekly, 5 * DAY_MS + 16 * 3600_000, 'week']
+      : [daily, 16 * 3600_000, 'day'];
+  const since = thin((source ?? []).filter((bar) => bar[0] + endsAfterMs > moment));
+  if (range === '1d') return since.length < 2 ? null : { t: since.map((bar) => bar[0] + endsAfterMs), c: since.map((bar) => bar[1] * scale) };
+  return { t: [moment, ...since.map((bar) => bar[0] + endsAfterMs)], c: [refs[range], ...since.map((bar) => bar[1] * scale)], base: refs[range], step };
+}
+
 // The closing level each period is measured from, for every row: what the
 // change columns, the tiles and the detail panel calculate their figures
 // against. A period the history does not reach back to has no entry.
@@ -761,6 +891,10 @@ async function loadBases() {
       if (reference) bases[range][symbol] = reference[1];
     }
   }
+  // A round-the-clock row is measured from its price a span ago instead.
+  for (const [symbol, { refs }] of Object.entries(await rollingRefs())) {
+    for (const range of Object.keys(RANGES)) if (refs[range] != null) bases[range][symbol] = refs[range];
+  }
   const incomplete = Boolean(daily.value[INCOMPLETE] || weekly.value[INCOMPLETE]);
   // Rows whose history is another source's for now, and which one.
   const backup = Object.fromEntries(SYMBOLS.map((symbol) => [symbol, daily.value[symbol]?.source ?? weekly.value[symbol]?.source]).filter(([, source]) => source));
@@ -770,7 +904,7 @@ async function loadBases() {
 // Fetches every period's history once at start-up, one bar size at a time, so
 // the first switch to a longer period does not wait on sixty-odd requests.
 async function warmUp() {
-  for (const get of [getQuotes, getProxyBars, getIntraday, ...Object.values(HISTORY).map((source) => source.get)]) {
+  for (const get of [getQuotes, getProxyBars, getIntraday, getMinutes, ...Object.values(HISTORY).map((source) => source.get), getHoursBack, getYearsBack]) {
     await get().catch(() => {});
   }
 }
@@ -779,7 +913,20 @@ async function warmUp() {
 
 const getQuotes = cached(QUOTE_TTL_MS, loadQuotes);
 const getIntraday = cached(SPARK_TTL_MS, () => forEachSymbol(loadSpark));
-const getSparks = (range) => (RANGES[range] ? loadRange(range) : getIntraday());
+// The lines of the day: each row's latest session, and the last 24 hours for a
+// round-the-clock row.
+async function loadDay() {
+  const sessions = await getIntraday();
+  const value = { ...sessions.value };
+  for (const [symbol, entry] of Object.entries(await rollingRefs())) {
+    const line = rollingLine('1d', entry);
+    if (line) value[symbol] = line;
+  }
+  if (sessions.value[INCOMPLETE]) markIncomplete(value, sessions.value[INCOMPLETE]);
+  return { ...sessions, value };
+}
+
+const getSparks = (range) => (RANGES[range] ? loadRange(range) : loadDay());
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 
