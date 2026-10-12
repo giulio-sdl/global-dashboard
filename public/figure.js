@@ -35,15 +35,16 @@ export function chartFigure(figure, onPeriod) {
     // Draws a period's line and writes what it shows: the change over the
     // period, the high and the low, the first and the last date. `change` is
     // in percent, or in basis points for a yield; null when it is not known.
+    // `span` names the period where its usual name does not fit ("24 hours").
     draw(what) {
       shown = what;
-      const { view, period, name, dp, change, isYield = false } = what;
+      const { view, period, name, dp, change, isYield = false, span = PERIOD_NAME[period].toLowerCase() } = what;
       const drawn = plotLine(svg, { ...view, dp }, { w: Math.max(240, plot.clientWidth), ...SIZE });
       svg.setAttribute('aria-label', `${name}, ${PERIOD_NAME[period]} chart`);
       const moved = changeText(change, isYield);
       $('figcaption', figure).replaceChildren(
-        drawn ? `Price, ${PERIOD_NAME[period].toLowerCase()}` : busy ? 'Loading the chart…' : 'No chart data for this period',
-        el('span', { class: `chip ${moved.dir}`, title: period === '1d' ? 'Change on the day' : `Change over ${PERIOD_NAME[period].toLowerCase()}`, text: moved.text }),
+        drawn ? `Price, ${span}` : busy ? 'Loading the chart…' : 'No chart data for this period',
+        el('span', { class: `chip ${moved.dir}`, title: span === 'intraday' ? 'Change on the day' : `Change over ${span}`, text: moved.text }),
       );
       $('.d-hi', figure).textContent = drawn ? fmt(drawn.hi, dp) : '';
       $('.d-lo', figure).textContent = drawn ? fmt(drawn.lo, dp) : '';

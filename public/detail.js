@@ -179,12 +179,13 @@ export function renderDetail() {
   const move = $('.dq-chg', dialog);
   move.textContent = isYield ? today.text : `${signed(q.change, q.dp).text} (${today.text})`;
   move.className = `dq-chg ${today.dir}`;
-  $('.dq-time', dialog).textContent = ['latest session', timeLabel(q.time)].filter(Boolean).join(' · ');
+  // A market that never closes has no session: its figures are of the last 24 hours.
+  $('.dq-time', dialog).textContent = [q.rolling ? 'last 24 hours' : 'latest session', timeLabel(q.time)].filter(Boolean).join(' · ');
 
   const range = (low, high) => (low != null && high != null ? `${price(low)} – ${price(high)}` : '—');
   const stats = [
-    stat('Previous close', price(q.prevClose)),
-    stat('Day range', range(q.low, q.high)),
+    stat(q.rolling ? '24 hours ago' : 'Previous close', price(q.prevClose)),
+    stat(q.rolling ? '24-hour range' : 'Day range', range(q.low, q.high)),
     stat('52-week range', range(q.yrLow, q.yrHigh)),
   ];
   if (after) stats.push(stat(`Since close · ${after.tag}`, `${signed(after.pct, 2, '%').text}, about ${fmt(after.level, q.dp)}`));
@@ -208,6 +209,7 @@ export function renderDetail() {
     // The change over the period on show, stated beside the chart.
     change: changes[PERIODS.indexOf(open.period)],
     isYield,
+    span: q.rolling && open.period === '1d' ? '24 hours' : undefined,
   });
 }
 

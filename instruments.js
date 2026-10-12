@@ -98,7 +98,11 @@ export const SECTIONS = [
             label: 'Index',
             kind: 'quote',
             items: [
-              { symbol: '.CD20', name: 'CoinDesk 20', note: '20 largest coins' },
+              // `rolling`: priced round the clock, so its changes are over exact
+              // spans (the last 24 hours, 5 days, ...) and not from a close (see
+              // rolling.js). The others cannot be: the feed has no weekend prices
+              // for the CoinDesk 5, and the S&P indexes publish one value a day.
+              { symbol: '.CD20', name: 'CoinDesk 20', note: '20 largest coins', rolling: true },
               { symbol: '.CD5', name: 'CoinDesk 5', note: '5 largest coins' },
               { symbol: '.SPCBDM', name: 'S&P Broad', note: 'All digital assets · daily' },
               { symbol: '.SPCMC', name: 'S&P MegaCap', note: 'Bitcoin and Ether · daily' },
@@ -116,16 +120,16 @@ export const SECTIONS = [
             label: 'Price in USD',
             kind: 'quote',
             items: [
-              { symbol: 'BTC.CM=', name: 'Bitcoin', note: 'BTC' },
-              { symbol: 'ETH.CM=', name: 'Ether', note: 'ETH' },
+              { symbol: 'BTC.CM=', name: 'Bitcoin', note: 'BTC', rolling: true },
+              { symbol: 'ETH.CM=', name: 'Ether', note: 'ETH', rolling: true },
               // Coins priced around a dollar or less: the Coin Metrics quote rounds to
               // cents, so the price comes from the spot quote, which has four decimals
               // but no chart history. `chart` names the symbol the history is taken from.
-              { symbol: 'XRP=', chart: 'XRP.CM=', name: 'XRP', note: 'XRP' },
-              { symbol: 'BNB.CM=', name: 'BNB', note: 'BNB' },
-              { symbol: 'SOL.CM=', name: 'Solana', note: 'SOL' },
-              { symbol: 'TRX=', chart: 'TRX.CM=', name: 'Tron', note: 'TRX' },
-              { symbol: 'SUI=', chart: 'SUI.CM=', name: 'Sui', note: 'SUI' },
+              { symbol: 'XRP=', chart: 'XRP.CM=', name: 'XRP', note: 'XRP', rolling: true },
+              { symbol: 'BNB.CM=', name: 'BNB', note: 'BNB', rolling: true },
+              { symbol: 'SOL.CM=', name: 'Solana', note: 'SOL', rolling: true },
+              { symbol: 'TRX=', chart: 'TRX.CM=', name: 'Tron', note: 'TRX', rolling: true },
+              { symbol: 'SUI=', chart: 'SUI.CM=', name: 'Sui', note: 'SUI', rolling: true },
             ],
           },
         ],
