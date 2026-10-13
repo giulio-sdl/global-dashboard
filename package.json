@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Live dashboard of global equity indexes, pre/post-market quotes and commodities",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test --test-timeout=30000 test/*.test.js"
   },
   "engines": {
     "node": ">=20"

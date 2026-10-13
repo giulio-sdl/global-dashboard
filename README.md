@@ -92,9 +92,9 @@ and every visitor's refreshes go to the data feeds through the one server.
   1 year, 5 years and 10 years, with a 10-year line (or as much history as there is). Yields show the same
   periods in basis points. The detail panel's chart has its own period buttons for all eight.
 - **How periods are measured**: always from a closing level, counted back from the instrument's latest
-  session. Five days is the close five sessions earlier; months and years are the last close on or before the
-  same date that long ago (the last weekly close for 5Y and 10Y). Futures use the continuous front-month
-  contract, so their long-period changes include contract rolls.
+  session ([periods.js](periods.js)). Five days is the close five sessions earlier; months and years are the
+  last close on or before the same date that long ago (the last weekly close for 5Y and 10Y). Futures use the
+  continuous front-month contract, so their long-period changes include contract rolls.
 - **Which session a quote belongs to** is worked out from the close its 1-day change is measured from, found
   among the daily closes, not from the date on the quote. The feed dates the closing quote of a US-listed
   fund a day early, dates a future by the calendar day of its last trade, and moves to today's date before a
@@ -121,6 +121,42 @@ in [public/styles.css](public/styles.css), driven by the colour variables at the
 Edit [instruments.js](instruments.js) and restart. Symbols are CNBC quote symbols:
 `.SPX` style for cash indexes, `@CL.1` style for front-month futures, plain tickers for US-listed securities,
 `EUR=` / `EURCHF=` style for currency pairs, and `BTC.CM=` style for crypto.
+
+## Tests
+
+```bash
+npm test
+```
+
+The calculation rules, each checked against made-up figures with Node's own test runner: nothing to install,
+no network, and done in a fraction of a second (it needs Node 20.11 or newer). One file in [test/](test) per
+module:
+
+| Tests | Rules |
+|---|---|
+| `quote.test.js` | Reading the feed's figures, which percentage is shown, a quote cleared ahead of the open |
+| `periods.test.js` | Which session a quote belongs to, the close each period is measured from, the line drawn since |
+| `cache.test.js` | What is asked for again and when: incomplete loads, the growing wait, an outage, a slow or failing source |
+| `rolling.test.js` | Spans of the clock for markets that never close |
+| `sinceclose.test.js` | The move since an exchange closed, read from a future or ETF |
+| `fred.test.js` | FRED's weekly bars, when it stands in for a yield's history, the day it lacks |
+| `edgar.test.js` | Years and quarters from the figures a company filed |
+
+`LIVE=1 npm test` adds five cases that read the real FRED series. [server.js](server.js) itself is not
+imported by any test: it starts listening and asks the feeds as soon as it loads, so what can be tested
+without that lives in the modules beside it.
+
+To check a running dashboard against its sources:
+
+```bash
+node scripts/live-check.js
+```
+
+It compares every row's price and 1-day change with the raw CNBC feed asked at the same moment, every 5-day
+reference close with the feed's daily bars, and the round-the-clock crypto changes with its own reading of the
+feed and with CoinGecko. It needs the network and the server, takes a minute or two, and takes the server's
+address if that is not `localhost:5177` (`node scripts/live-check.js http://localhost:5199`). It reports the
+feed's known weak spots too (below) when one of them is showing.
 
 ## Data sources
 
@@ -185,12 +221,13 @@ product id on that site. There is no such fund for TOPIX, Shanghai Composite, Sh
 Nifty 50 or Nifty Bank, so those open without constituents. Copenhagen, Vienna and Warsaw listings are not
 quoted by the feed, which leaves about 4% of the STOXX Europe 600 by weight without a price.
 
-Two quirks of the feed are handled in [server.js](server.js). Shortly before an exchange opens it clears the
-day's figures (change reads 0.00); until trading starts the dashboard shows the last session's change instead,
-taken from the daily closes. And it is sometimes slow, most of all around the US open, so a refresh that takes
-more than 2.5 seconds returns the previous figures while it finishes in the background. A history load that
-comes back incomplete (the 07:30 job can start the server before the network is up after the Mac wakes) is
-retried after 20 seconds rather than kept for its usual cache time.
+Two quirks of the feed are handled on the server. Shortly before an exchange opens it clears the day's
+figures (change reads 0.00); until trading starts the dashboard shows the last session's change instead,
+taken from the daily closes ([quote.js](quote.js)). And it is sometimes slow, most of all around the US open,
+so a refresh that takes more than 2.5 seconds returns the previous figures while it finishes in the
+background ([cache.js](cache.js)). A history load that comes back incomplete (the 07:30 job can start the
+server before the network is up after the Mac wakes) is retried after 20 seconds rather than kept for its
+usual cache time.
 
 On some days the history service answers a good share of requests with no bars at all (one Sunday morning,
 between a sixth and a third of them). An empty answer is therefore treated as a failed request, not as an
