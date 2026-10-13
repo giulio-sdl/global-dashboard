@@ -198,6 +198,12 @@ instrument without history: the missing symbols alone are asked for again after 
 doubles each time while the very same symbols keep failing, so one that truly has no data is not asked for
 endlessly.
 
+When the history is missing for everything at once, the source itself is down. That has happened when the
+local network could not look up the history service's address for a couple of minutes (prices come from
+another address and kept working). It is then asked for every 20 seconds with no growing wait, and the page
+fills in by itself within about 20 seconds of it returning. While most rows lack a history, a banner on the
+page says so, instead of leaving the lines, charts and longer changes as unexplained dashes.
+
 For three S&P crypto indexes the feed rounds its own percentage change to one decimal (-2.70% for a fall of
 2.76%). Where the feed's percentage is further from the one its price and change imply than rounding can
 explain, the implied one is shown.
