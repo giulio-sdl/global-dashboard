@@ -7,6 +7,7 @@ import { $, el, fmt, getJson, signed, store, timeLabel } from './util.js';
 const SPARK_REFRESH_MS = 180_000;
 const BASES_REFRESH_MS = 600_000;
 const BASES_RETRY_MS = 20_000;
+const HISTORY_MISSING = 'The price history is not loading right now, so trend lines, charts and the changes beyond one day are missing for most rows. Prices are live. This keeps retrying on its own and fills in when the history returns.';
 const SPARK = { w: 76, h: 30, pad: 4 };
 const TILE_SPARK = { w: 200, h: 40, pad: 4 };
 const FLASH_MS = 700;
@@ -415,10 +416,16 @@ function setStatus(text) {
   if (text) $('span', status).textContent = text;
 }
 
-function showBanner(message) {
+// One banner, several things that may need saying. Each kind keeps its own
+// message until it is cleared; the banner shows the first there is.
+const notices = { server: null, quotes: null, history: null, lines: null };
+
+function showBanner(message, kind = 'quotes') {
+  notices[kind] = message || null;
   const banner = $('#banner');
-  banner.hidden = !message;
-  banner.textContent = message || '';
+  const text = Object.values(notices).find(Boolean);
+  banner.hidden = !text;
+  banner.textContent = text || '';
 }
 
 async function refreshQuotes() {
@@ -448,10 +455,11 @@ async function loadLines({ quiet = false } = {}) {
     if (request !== state.lineRequest) return;
     state.sparks = data.sparks;
     state.sparksFor = line;
+    showBanner(null, 'lines');
     render();
   } catch (err) {
     // A background refresh can fail silently; the quote banner already reports provider trouble.
-    if (!quiet && request === state.lineRequest) showBanner(`Could not load the ${PERIOD_NAME[line]} trend lines (${err.message}).`);
+    if (!quiet && request === state.lineRequest) showBanner(`Could not load the ${PERIOD_NAME[line]} trend lines (${err.message}).`, 'lines');
   } finally {
     if (request === state.lineRequest) document.body.classList.remove('loading');
   }
@@ -485,6 +493,11 @@ async function refreshBases() {
     state.basesIncomplete = data.incomplete;
     state.backup = data.backup ?? {};
     render();
+    // With most rows lacking a history, the page says why its lines and
+    // longer changes are missing instead of leaving them as unexplained dashes.
+    const rows = document.querySelectorAll('tr[data-sym]').length;
+    const missing = data.incomplete && Object.keys(data.bases['1w'] ?? {}).length < rows / 2;
+    showBanner(missing ? HISTORY_MISSING : null, 'history');
     // Some history failed to load (the network was not ready, or the feed
     // answered with nothing): the server is filling the gaps, so ask again
     // shortly. When rows have just been filled, fetch their trend lines too.
@@ -492,7 +505,10 @@ async function refreshBases() {
     if (filling && filled) loadLines({ quiet: true });
     if (data.incomplete) setTimeout(refreshBases, BASES_RETRY_MS);
   } catch {
-    if (!state.bases['1w']) setTimeout(refreshBases, BASES_RETRY_MS);
+    if (!state.bases['1w']) {
+      showBanner(HISTORY_MISSING, 'history');
+      setTimeout(refreshBases, BASES_RETRY_MS);
+    }
   }
 }
 
@@ -584,7 +600,7 @@ async function init() {
   try {
     state.config = await getJson('/api/config');
   } catch (err) {
-    showBanner(`Could not reach the dashboard server (${err.message}). Start it with "npm start".`);
+    showBanner(`Could not reach the dashboard server (${err.message}). Start it with "npm start".`, 'server');
     return;
   }
   build(state.config);

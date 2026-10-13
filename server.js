@@ -73,9 +73,13 @@ async function fetchJson(url, timeoutMs = 12_000) {
 }
 
 // Marks a result as missing some of its symbols and names them, without the
-// mark showing up among its entries.
+// mark showing up among its entries. When every one of `total` symbols is
+// missing, the list is flagged as an outage: the source itself is down (the
+// network, or the feed's history service), not one instrument.
 const INCOMPLETE = Symbol('incomplete');
-const markIncomplete = (results, failed) => Object.defineProperty(results, INCOMPLETE, { value: failed });
+const markIncomplete = (results, failed, total = Infinity) => Object.defineProperty(results, INCOMPLETE, {
+  value: Object.assign(failed, { outage: failed.outage || failed.length >= total }),
+});
 const RETRY_INCOMPLETE_MS = 20_000;
 
 // Serves a cached value while fresh, shares one in-flight refresh between
@@ -91,7 +95,9 @@ const RETRY_INCOMPLETE_MS = 20_000;
 // `RETRY_INCOMPLETE_MS` with the incomplete value, so that it can ask for the
 // missing symbols alone. While the very same symbols keep failing, each wait
 // is twice the last: a symbol that has no data at all is not asked for
-// endlessly. Everything is loaded afresh once the cache time is up, as usual.
+// endlessly. An outage is the exception: when everything is missing the
+// source is down, it comes back all at once, and it is asked every time.
+// Everything is loaded afresh once the cache time is up, as usual.
 function cached(ttlMs, load, patienceMs = 2_500) {
   let value = null;
   let at = 0; // when everything was last loaded
@@ -105,7 +111,7 @@ function cached(ttlMs, load, patienceMs = 2_500) {
     value = failed ? markIncomplete(merged, failed) : merged;
     if (everything) at = Date.now();
     const same = failed && before && failed.length === before.length && failed.every((symbol) => before.includes(symbol));
-    stuck = same ? stuck + 1 : 0;
+    stuck = same && !failed.outage ? stuck + 1 : 0;
     retryAt = failed ? Date.now() + RETRY_INCOMPLETE_MS * 2 ** Math.min(stuck, 10) : Infinity;
   };
   return async () => {
@@ -558,7 +564,7 @@ async function forEachSymbol(load, symbols = SYMBOLS, concurrency = SPARK_CONCUR
   };
   const failed = await run(await run(known?.[INCOMPLETE] ?? symbols));
   if (!known && symbols.length && failed.length === symbols.length) throw new Error('chart feed unavailable');
-  return failed.length ? markIncomplete(results, failed) : results;
+  return failed.length ? markIncomplete(results, failed, symbols.length) : results;
 }
 
 const dailyHistory = steady(() => HISTORY.day.get());
@@ -591,7 +597,7 @@ for (const source of Object.values(HISTORY)) {
       throw new Error('no bars');
     }, SYMBOLS, SPARK_CONCURRENCY, known).catch((err) => ({ outage: err }));
     // With the feed's history down altogether, the stand-in is all there is.
-    const result = await standIn(loaded.outage ? markIncomplete({}, [...SYMBOLS]) : loaded, source, charted);
+    const result = await standIn(loaded.outage ? markIncomplete({}, [...SYMBOLS], SYMBOLS.length) : loaded, source, charted);
     if (loaded.outage && !Object.keys(result).length) throw loaded.outage;
     return result;
   });
