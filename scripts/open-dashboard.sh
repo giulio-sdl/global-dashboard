@@ -1,14 +1,14 @@
 #!/bin/zsh
 # Starts the dashboard server if it is not already running, then opens the
-# dashboard in the default browser. The scheduled job runs this every weekday
-# morning (see README). Pass --no-open to start the server without a browser.
+# dashboard in the default browser. Pass --no-open to start the server without
+# a browser (the Mac app does, and shows the page in its own window).
 
 DIR="${0:A:h:h}" # the project folder, one level above scripts/
 PORT="${PORT:-5177}"
 URL="http://localhost:$PORT"
 LOG="$HOME/Library/Logs/global-dashboard.log"
 
-# A scheduled job gets a bare PATH; Homebrew's Node is not on it.
+# Started from an app, the script gets a bare PATH; Homebrew's Node is not on it.
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 running() { /usr/bin/curl -s -o /dev/null --max-time 2 "$URL/api/config"; }
