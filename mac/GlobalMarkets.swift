@@ -3,7 +3,7 @@
 // A small Mac app around the dashboard's page. When it opens it makes sure the
 // dashboard's server is running, starting it with scripts/open-dashboard.sh if
 // not, and then shows the page. The server keeps running after the window is
-// closed, as it does when the 07:30 job starts it.
+// closed, as it does when the script is run by hand.
 //
 // scripts/build-mac-app.sh builds it and records in its Info.plist the project
 // folder (DashboardFolder) and the port the server listens on (DashboardPort).
@@ -74,7 +74,7 @@ final class Controller: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
     return ok
   }
 
-  // The same script the 07:30 job runs, without opening a browser. It starts
+  // The script that opens the dashboard in a browser, told not to. It starts
   // the server detached, so it outlives this app, and waits for it to answer.
   func runStartScript() {
     let script = Process()
