@@ -12,21 +12,34 @@ npm start
 Then open http://localhost:5177. Needs Node 20 or newer; there are no dependencies to install.
 Set `PORT` to use a different port.
 
-## Opening automatically each morning
+## Opening it
 
-A scheduled job opens the dashboard in the default browser at 07:30, Monday to Friday. It runs
-[scripts/open-dashboard.sh](scripts/open-dashboard.sh), which starts the server if it is not already running.
-The Mac has to be on and logged in; if it is asleep at 07:30, the job runs when it wakes.
-
-The schedule is `scripts/local.global-dashboard.open.plist`, installed as a copy in `~/Library/LaunchAgents`.
-It holds paths specific to one Mac, so it is not in the repository. To change the time or days, edit both
-copies and reload, or to switch it off altogether:
+[scripts/open-dashboard.sh](scripts/open-dashboard.sh) starts the server if it is not already running and opens
+the dashboard in the default browser:
 
 ```bash
-launchctl bootout gui/$(id -u)/local.global-dashboard.open && rm ~/Library/LaunchAgents/local.global-dashboard.open.plist
+"/Users/giulio/Projects/Global Dashboard/scripts/open-dashboard.sh"
 ```
 
-Server output from scheduled runs goes to `~/Library/Logs/global-dashboard.log`.
+The server it starts runs on in the background, and its output goes to `~/Library/Logs/global-dashboard.log`.
+(A job that opened the dashboard at 07:30 each weekday was removed in favour of opening it when wanted.)
+
+## Mac app
+
+`scripts/build-mac-app.sh` builds **Global Markets.app** into `~/Applications`: the dashboard in a window of
+its own, with its own Dock icon, found through Spotlight and Launchpad like any app.
+
+```bash
+"/Users/giulio/Projects/Global Dashboard/scripts/build-mac-app.sh"
+```
+
+- Opening it starts the server if it is not running (with the same script as above), then shows the page. Closing the window quits the app and leaves the server running.
+- Links that lead elsewhere (the SEC's filings) open in the default browser, and View → Open in Browser (⇧⌘O)
+  opens the dashboard there too. ⌘R reloads.
+- The window comes back where it was last left, at the size it was left.
+- It is a small Swift program, [mac/GlobalMarkets.swift](mac/GlobalMarkets.swift), around the system's web view;
+  [mac/make-icon.swift](mac/make-icon.swift) draws its icon. Building needs the Xcode command line tools
+  (`xcode-select --install`). The app records where the project is, so build it again after moving the folder.
 
 ## Hosting it for others
 
@@ -189,7 +202,7 @@ Two quirks of the feed are handled in [server.js](server.js). Shortly before an 
 day's figures (change reads 0.00); until trading starts the dashboard shows the last session's change instead,
 taken from the daily closes. And it is sometimes slow, most of all around the US open, so a refresh that takes
 more than 2.5 seconds returns the previous figures while it finishes in the background. A history load that
-comes back incomplete (the 07:30 job can start the server before the network is up after the Mac wakes) is
+comes back incomplete (a server started just as the Mac wakes can run before the network is up) is
 retried after 20 seconds rather than kept for its usual cache time.
 
 On some days the history service answers a good share of requests with no bars at all (one Sunday morning,
