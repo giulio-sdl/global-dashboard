@@ -38,7 +38,8 @@ and every visitor's refreshes go to the data feeds through the one server.
 ## What it shows
 
 - **At a glance**: a row of headline tiles (main index per region, gold, Brent, EUR/USD, USD/CHF, CoinDesk 20, Bitcoin) with value,
-  change, trend and exchange status. The list is `OVERVIEW` in [instruments.js](instruments.js).
+  change, trend and exchange status. The list is `OVERVIEW` in [instruments.js](instruments.js), and can be
+  changed from the page (see "Changing the instruments").
 - A bar that stays in view while scrolling, with links to each section and the period selector.
 - **Main indexes** in two cards (Americas and Europe; Asia, including South Korea), two or three per country, each country with its
   exchange status (open, lunch break, pre-market, after-hours, closed, holiday) and a countdown to the next
@@ -118,9 +119,35 @@ in [public/styles.css](public/styles.css), driven by the colour variables at the
 
 ## Changing the instruments
 
-Edit [instruments.js](instruments.js) and restart. Symbols are CNBC quote symbols:
-`.SPX` style for cash indexes, `@CL.1` style for front-month futures, plain tickers for US-listed securities,
-`EUR=` / `EURCHF=` style for currency pairs, and `BTC.CM=` style for crypto.
+**From the page**: "Edit rows" at the top right puts a ★ and a × on every row and a "+ Add a row" button under
+every table. The changes apply at once, in every open copy of the page (a browser and the Mac app alike), and
+outlast a restart. "Done" puts the controls away.
+
+- **Adding**: type a symbol, or pick one of the suggestions for that table (CAC 40, IBEX 35, ASX 200, Bovespa,
+  Dogecoin, orange juice and so on; the list is [public/catalog.js](public/catalog.js)). The server asks the
+  quote feed for it first, so a symbol the feed does not know is turned away, and so is one already on the page.
+  Without a name the feed's own is used. The new row has its price straight away and its longer changes and
+  trend line within a few seconds.
+- **Where a new row goes**: at the end of its table. An index added to a country has that exchange's status,
+  but no "Since close" figure and no constituents: those need a proxy and an iShares fund, which are set in
+  [instruments.js](instruments.js). Indexes that belong to no country listed (Canada, Brazil, Australia) go
+  under "Other markets" in either card, which only shows once it has a row. A coin priced by Coin Metrics
+  (`DOGE.CM=`) is measured round the clock like the others.
+- **Removing**: × takes a row off at once, and "Undo" in the note at the foot of the page puts it back. A row from
+  [instruments.js](instruments.js) returns in its old place with its tile.
+- **Tiles**: ★ shows a row as a tile under "At a glance" (at the end), or stops showing it.
+- **Restore defaults** (two clicks) goes back to [instruments.js](instruments.js) as it is.
+- The changes are kept in `layout.local.json` next to `server.js` (not in the repository) as changes to
+  [instruments.js](instruments.js), so rows added to that file later still appear. Deleting the file restores
+  the defaults too.
+- Only the computer running the server can make changes. On a hosted copy visitors see no "Edit rows", and the
+  server refuses changes sent from anywhere but its own page.
+- The currency cross-rate grid follows from the USD pairs and is not edited this way.
+
+**In the code**: edit [instruments.js](instruments.js) and restart, to reorder rows, change the defaults, or
+give an index its proxy or constituents. Symbols are CNBC quote symbols: `.SPX` style for cash indexes,
+`@CL.1` style for front-month futures, plain tickers for US-listed securities, `EUR=` / `EURCHF=` style for
+currency pairs, and `BTC.CM=` style for crypto.
 
 ## Data sources
 

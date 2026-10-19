@@ -1,4 +1,6 @@
-// What the dashboard shows. Edit this file to add, remove or reorder rows.
+// What the dashboard shows by default. Rows can also be added, removed and
+// shown as tiles from the page itself (see layout.js); edit this file to
+// reorder them, or to give an index its proxy or constituents.
 // Symbols are CNBC quote symbols: ".XXX" = cash index, "@XX.1" = front-month
 // future, plain ticker = US-listed security (the only kind with pre/post-market),
 // "EUR=" = currency pair, "BTC.CM=" = crypto price from Coin Metrics, "US10Y" = Treasury yield.
@@ -32,6 +34,10 @@ const country = (label, markets, items) => ({ label, markets, kind: 'quote', ite
 const future = (symbol, name) => ({ symbol, name, tag: 'Fut' });
 const etf = (symbol, name) => ({ symbol, name, tag: symbol });
 
+// Indexes added from the page that belong to none of the countries above.
+// Empty to begin with, and hidden while it is.
+const otherMarkets = () => ({ label: 'Other markets', kind: 'quote', items: [] });
+
 // The headline tiles at the top of the page, in order.
 export const OVERVIEW = ['.SPX', '.NDX', '.STOXX', '.SSMI', '.FTSE', '.N225', '.SSEC', '.NSEI', '.CD20', 'BTC.CM=', '@GC.1', '@LCO.1', 'EUR=', 'CHF='];
 
@@ -61,6 +67,7 @@ export const SECTIONS = [
             { symbol: '.FTSE', name: 'FTSE 100', holdings: { fund: 251795, etf: 'iShares Core FTSE 100 UCITS ETF' }, proxy: etf('EWU', 'iShares MSCI United Kingdom ETF') },
             { symbol: '.FTMC', name: 'FTSE 250', holdings: { fund: 251796, etf: 'iShares FTSE 250 UCITS ETF' }, proxy: etf('EWU', 'iShares MSCI United Kingdom ETF') },
           ]),
+          otherMarkets(),
         ],
       },
       {
@@ -83,6 +90,7 @@ export const SECTIONS = [
             { symbol: '.NSEI', name: 'Nifty 50', proxy: etf('INDA', 'iShares MSCI India ETF') },
             { symbol: '.NSEBANK', name: 'Nifty Bank', proxy: etf('INDA', 'iShares MSCI India ETF') },
           ]),
+          otherMarkets(),
         ],
       },
     ],

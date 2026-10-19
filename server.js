@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { createEdgar } from './edgar.js';
 import { loadFredSeries, weekly as weeklyBars } from './fred.js';
 import { loadHoldings } from './holdings.js';
-import { MARKETS, OVERVIEW, SECTIONS } from './instruments.js';
+import { MARKETS } from './instruments.js';
+import { openLayout, Refusal } from './layout.js';
 import { betweenDailyCloses, HOUR_BAR_MS, MINUTE_BAR_MS, momentBefore, priceAt, rangeSince } from './rolling.js';
 import { sinceClose } from './sinceclose.js';
 
@@ -50,20 +51,35 @@ const SPARK_MIN_BARS = 6;
 const SPARK_MAX_POINTS = 300;
 const DAY_MS = 24 * 3600_000;
 
-const SYMBOLS = [...new Set(SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) => g.items.map((i) => i.symbol)))).filter(Boolean))];
+// What the page shows: the defaults in instruments.js with the changes made
+// from the page, kept in layout.local.json (see layout.js). The lists below
+// are drawn from it, and drawn again whenever it changes; everything that
+// reads them does so when it runs, so a row added from the page is picked up.
+const LAYOUT = await openLayout(path.join(ROOT, 'layout.local.json'));
+let layoutVersion; // changes with every edit, so that open pages know to fetch the layout again
 
-// Where each row's chart history comes from: its own symbol, unless it names another.
-const CHART_SYMBOL = new Map(SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) =>
-  g.items.filter((item) => item.symbol).map((item) => [item.symbol, item.chart ?? item.symbol])))));
+let SYMBOLS;
+let CHART_SYMBOL; // where each row's chart history comes from: its own symbol, unless it names another
+let FRED_SERIES; // rows with a second source for their history: the FRED series each one names
+let PROXIED; // indexes whose move since the close is read from a future or ETF that keeps trading
+let PROXY_SYMBOLS;
+let INDEX_ITEMS; // indexes whose constituents the detail panel shows
+let ROLLING; // rows priced round the clock (see "markets that never close")
 
-// Rows with a second source for their history: the FRED series each one names.
-const FRED_SERIES = new Map(SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) =>
-  g.items.filter((item) => item.fred).map((item) => [item.symbol, item.fred])))));
+function applyLayout() {
+  const rows = LAYOUT.current().sections.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) =>
+    g.items.filter((item) => item.symbol).map((item) => ({ ...item, market: item.market ?? g.markets?.[0] })))));
+  SYMBOLS = [...new Set(rows.map((item) => item.symbol))];
+  CHART_SYMBOL = new Map(rows.map((item) => [item.symbol, item.chart ?? item.symbol]));
+  FRED_SERIES = new Map(rows.filter((item) => item.fred).map((item) => [item.symbol, item.fred]));
+  PROXIED = rows.filter((item) => item.proxy).map((item) => ({ symbol: item.symbol, market: item.market, proxy: item.proxy.symbol }));
+  PROXY_SYMBOLS = [...new Set(PROXIED.map((p) => p.proxy))];
+  INDEX_ITEMS = new Map(rows.filter((item) => item.holdings).map((item) => [item.symbol, item]));
+  ROLLING = rows.filter((item) => item.rolling).map((item) => item.symbol);
+  layoutVersion = Math.max(Date.now(), (layoutVersion ?? 0) + 1);
+}
+applyLayout();
 
-// Indexes whose move since the close is read from a future or ETF that keeps trading.
-const PROXIED = SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) =>
-  g.items.filter((item) => item.proxy).map((item) => ({ symbol: item.symbol, market: item.market ?? g.markets?.[0], proxy: item.proxy.symbol })))));
-const PROXY_SYMBOLS = [...new Set(PROXIED.map((p) => p.proxy))];
 const PROXY_DAYS_BACK = 7; // far enough to reach the last close across a long weekend
 
 async function fetchJson(url, timeoutMs = 12_000) {
@@ -114,7 +130,7 @@ function cached(ttlMs, load, patienceMs = 2_500) {
     stuck = same && !failed.outage ? stuck + 1 : 0;
     retryAt = failed ? Date.now() + RETRY_INCOMPLETE_MS * 2 ** Math.min(stuck, 10) : Infinity;
   };
-  return async () => {
+  const get = async () => {
     const stale = !value || Date.now() - at >= ttlMs;
     if (!stale && Date.now() < retryAt) return { value, at, error: null };
     pending ??= load(stale ? null : value)
@@ -129,6 +145,22 @@ function cached(ttlMs, load, patienceMs = 2_500) {
     if (!value) throw new Error(error || 'no data');
     return { value, at, error };
   };
+  // For rows just added to the page: the symbols the value lacks are fetched
+  // at once, alone, the way failed ones are topped up, rather than waiting
+  // for the next full load. Resolves once they have been asked for. A load
+  // already under way began with the old list of rows, so it is let finish first.
+  get.include = async (symbols) => {
+    while (pending) await pending;
+    if (!value) return; // the first load asks for every row anyway
+    const absent = symbols.filter((symbol) => !(symbol in value));
+    if (!absent.length) return;
+    value = markIncomplete({ ...value }, [...new Set([...(value[INCOMPLETE] ?? []), ...absent])]);
+    retryAt = 0;
+    stuck = 0;
+    get().catch(() => {});
+    await pending;
+  };
+  return get;
 }
 
 // ---- quotes ---------------------------------------------------------------
@@ -350,11 +382,6 @@ async function loadQuotes() {
 
 // ---- index constituents -----------------------------------------------------
 
-const INDEX_ITEMS = new Map(
-  SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) => g.items)))
-    .filter((item) => item.holdings)
-    .map((item) => [item.symbol, item]),
-);
 const lastLiveDetail = new Map();
 
 // One cached loader per key, made on first use.
@@ -786,8 +813,7 @@ async function getChart(indexSymbol, symbol, range) {
 // the same time of day so many months back. `read` is where the price at that
 // moment comes from: ten-minute bars reach a week back, hourly ones about
 // three months, and beyond that there are only daily closes to place it between.
-const ROLLING = SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) =>
-  g.items.filter((item) => item.rolling).map((item) => item.symbol))));
+// The rows measured this way are `ROLLING`, at the top.
 const SPANS = {
   '1d': { hours: 24, read: 'minutes' },
   '1w': { hours: 120, read: 'minutes' },
@@ -918,7 +944,7 @@ async function warmUp() {
 // ---- http -----------------------------------------------------------------
 
 const getQuotes = cached(QUOTE_TTL_MS, loadQuotes);
-const getIntraday = cached(SPARK_TTL_MS, () => forEachSymbol(loadSpark));
+const getIntraday = cached(SPARK_TTL_MS, (known) => forEachSymbol(loadSpark, SYMBOLS, SPARK_CONCURRENCY, known));
 // The lines of the day: each row's latest session, and the last 24 hours for a
 // round-the-clock row.
 async function loadDay() {
@@ -933,6 +959,121 @@ async function loadDay() {
 }
 
 const getSparks = (range) => (RANGES[range] ? loadRange(range) : loadDay());
+
+// ---- editing the layout -------------------------------------------------------
+
+// Rows are added, removed and pinned as tiles from the page, but only from
+// this computer: on a hosted copy visitors can look and not edit. A change
+// must also come from the dashboard's own page and not from another site open
+// in the same browser: so it has to be sent as JSON (which another site cannot
+// do without this server's leave), any origin it names must be this server,
+// and it must be addressed to a local name (a site whose own name is made to
+// lead here is turned away).
+const LOCAL_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+const LOCAL_NAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
+const hostname = (host) => { try { return new URL(`http://${host}`).hostname; } catch { return null; } };
+
+const mayEdit = (req) => LOCAL_ADDRESSES.has(req.socket.remoteAddress) && LOCAL_NAMES.has(hostname(req.headers.host));
+
+const sentFromPage = (req) => mayEdit(req)
+  && /^application\/json\b/.test(req.headers['content-type'] ?? '')
+  && (!req.headers.origin || req.headers.origin === `http://${req.headers.host}`);
+
+const configFor = (req) => ({ ...LAYOUT.current(), markets: MARKETS, editable: mayEdit(req), version: layoutVersion });
+
+function readJson(req, limit = 4096) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > limit) req.destroy(new Refusal('That request is too large.'));
+      else chunks.push(chunk);
+    });
+    req.on('end', () => {
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch { reject(new Refusal('That request is not JSON.')); }
+    });
+    req.on('error', reject);
+  });
+}
+
+const text = (value, max) => (typeof value === 'string' && value.trim().slice(0, max)) || undefined;
+const SYMBOL_FORM = /^[A-Z0-9.@=^_-]{1,24}$/;
+
+// The feed's name for an instrument, made to fit a row: "Orange Juice
+// (Nov'26)" becomes "Orange Juice", "IBEX 35 Idx" "IBEX 35", and
+// "Dogecoin/USD Coin Metrics" "Dogecoin".
+const shortName = (fullName) => fullName
+  ?.replace(/\s*\([A-Z][a-z]{2}'\d{2}\)$/, '')
+  .replace(/\/USD-? Coin Metrics$/, '')
+  .replace(/ (Index|Idx|FX Spot Rate|FX Cross Rate)$/i, '')
+  .trim() || null;
+
+// Fetches what a row needs that the caches lack: its quote, its lines and
+// the closes its changes are measured from. The page waits for this a few
+// seconds at most, so that a new row arrives filled in; whatever is slower
+// fills in on the page's next refresh.
+const FILL_PATIENCE_MS = 8_000;
+
+function fillRows(symbols) {
+  const rolling = symbols.filter((symbol) => ROLLING.includes(symbol));
+  const sources = [
+    [symbols, [getQuotes, getIntraday, ...Object.values(HISTORY).map((source) => source.get)]],
+    [rolling, [getMinutes, getHoursBack, getYearsBack]],
+  ];
+  const filled = Promise.all(sources.flatMap(([list, gets]) => (list.length ? gets.map((get) => get.include(list).catch(() => {})) : [])));
+  return Promise.race([filled, new Promise((resolve) => setTimeout(resolve, FILL_PATIENCE_MS))]);
+}
+
+const EDITS = {
+  // { group, symbol, name?, note?, unit? }: the symbol is checked against the
+  // quote feed first, so a mistyped one is not saved. Without a name the
+  // feed's own is used.
+  async add(body) {
+    const symbol = text(body.symbol, 24)?.toUpperCase();
+    if (!symbol || !SYMBOL_FORM.test(symbol)) throw new Refusal('That is not a symbol the quote feed uses.');
+    let quote;
+    try {
+      quote = (await fetchQuotes([symbol]))[symbol];
+    } catch (err) {
+      throw Object.assign(new Error(`The quote feed could not be reached to check ${symbol} (${err.message}).`), { status: 502 });
+    }
+    if (!quote) throw new Refusal(`The quote feed has no price for ${symbol}.`);
+    const item = { symbol, name: text(body.name, 40) ?? shortName(quote.fullName) ?? symbol, note: text(body.note, 60), unit: text(body.unit, 20), added: true };
+    // A coin priced by Coin Metrics trades round the clock and is measured like the others.
+    if (symbol.endsWith('.CM=')) item.rolling = true;
+    await LAYOUT.add(text(body.group, 200), item);
+    applyLayout();
+    await fillRows([symbol]);
+  },
+  // { symbol }
+  async remove(body) {
+    await LAYOUT.remove(text(body.symbol, 24));
+    applyLayout();
+  },
+  // { symbol, pinned }: shows a row as a tile at the top, or stops.
+  async tile(body) {
+    await LAYOUT.pin(text(body.symbol, 24), body.pinned === true);
+    applyLayout();
+  },
+  // Back to instruments.js as it is.
+  async reset() {
+    await LAYOUT.reset();
+    applyLayout();
+    await fillRows(SYMBOLS);
+  },
+};
+
+async function edit(req, res, action) {
+  if (req.method !== 'POST') return sendJson(res, 405, { error: 'Changes are sent with POST.' });
+  if (!sentFromPage(req)) return sendJson(res, 403, { error: 'The layout can only be changed from the dashboard on the computer running it.' });
+  try {
+    await action(await readJson(req));
+    sendJson(res, 200, { config: configFor(req) });
+  } catch (err) {
+    sendJson(res, err instanceof Refusal ? 400 : err.status ?? 500, { error: err.message });
+  }
+}
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 
@@ -965,8 +1106,11 @@ async function sendStatic(res, pathname) {
 http
   .createServer((req, res) => {
     const { pathname, searchParams } = new URL(req.url, 'http://localhost');
-    if (pathname === '/api/config') return sendJson(res, 200, { sections: SECTIONS, markets: MARKETS, overview: OVERVIEW });
-    if (pathname === '/api/quotes') return sendData(res, 'quotes', getQuotes);
+    if (pathname === '/api/config') return sendJson(res, 200, configFor(req));
+    // Each refresh says which layout it belongs to, so a page open while the
+    // layout was changed elsewhere (the Mac app and a browser) catches up.
+    if (pathname === '/api/quotes') return sendData(res, 'quotes', async () => ({ ...(await getQuotes()), layout: layoutVersion }));
+    if (pathname.startsWith('/api/layout/') && Object.hasOwn(EDITS, pathname.slice(12))) return edit(req, res, EDITS[pathname.slice(12)]);
     if (pathname === '/api/index') return sendData(res, 'detail', () => getIndexDetail(searchParams.get('symbol'), searchParams.get('range')));
     if (pathname === '/api/company') return sendData(res, 'company', () => getCompany(searchParams.get('index'), searchParams.get('symbol')));
     if (pathname === '/api/chart') return sendData(res, 'chart', () => getChart(searchParams.get('index'), searchParams.get('symbol'), searchParams.get('range')));
