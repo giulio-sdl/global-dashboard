@@ -5,5 +5,7 @@ node_modules/
 scripts/*.plist
 # Settings for this computer only (the contact address given to the SEC).
 settings.local.json
+# The rows and tiles changed from the page (see layout.js).
+layout.local.json
 # Company financials fetched from SEC EDGAR.
 .cache/

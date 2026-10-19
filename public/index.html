@@ -32,6 +32,8 @@
       </label>
       <button id="refresh" type="button" class="control">Refresh now</button>
       <button id="theme" type="button" class="control">Theme: auto</button>
+      <button id="reset" type="button" class="control" hidden>Restore defaults</button>
+      <button id="edit" type="button" class="control" aria-pressed="false" hidden>Edit rows</button>
     </div>
   </header>
 
@@ -56,6 +58,7 @@
   <main id="main">
     <section id="overview">
       <h2>At a glance</h2>
+      <p class="edit-hint">Rows marked ★ show here as tiles. Click a row's ★ to add or remove its tile; new tiles go at the end.</p>
       <div id="tiles" class="tiles"></div>
     </section>
   </main>
@@ -133,6 +136,7 @@
   </dialog>
 
   <div id="tip" class="tip" hidden></div>
+  <div id="toast" class="toast" role="status" hidden><span></span><button type="button" class="control" hidden></button></div>
   <script type="module" src="app.js"></script>
 </body>
 </html>

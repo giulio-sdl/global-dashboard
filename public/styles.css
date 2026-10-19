@@ -765,6 +765,96 @@ button.co:hover, button.co:focus-visible { text-decoration: underline; text-unde
 
 /* ---- narrow cards: drop the supplementary columns, keep the numbers ---- */
 
+/* ---- editing the rows: out of sight until "Edit rows" is pressed ---- */
+
+.row-edit, .adder, .edit-hint { display: none; }
+body:not(.editing) .empty { display: none; } /* a table with no rows yet, or none left */
+.editing .adder { display: block; padding: 8px 0 10px; }
+.adder + table { margin-top: 6px; }
+.editing .edit-hint { display: block; margin: -4px 0 10px; color: var(--ink-2); font-size: 13px; }
+#edit[aria-pressed="true"] { border-color: var(--yellow); background: var(--yellow); color: #141414; }
+
+/* Pin as a tile, and remove: at the right of the name, which makes room for
+   them. The trend line steps aside meanwhile, so the names keep their width. */
+.editing .c-spark { display: none; }
+.editing tr[data-sym] > th { position: relative; padding-right: 62px; }
+.editing .row-edit { position: absolute; top: 50%; right: 6px; display: flex; gap: 4px; transform: translateY(-50%); }
+.edit-btn {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--muted);
+  font: 700 15px/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+.edit-btn:hover { border-color: var(--ink-2); color: var(--ink); }
+.edit-btn.pin[aria-pressed="true"] { border-color: var(--yellow); background: var(--yellow); color: #141414; }
+.edit-btn.remove:hover { border-color: var(--accent); background: var(--accent); color: #fff; }
+
+.add-open {
+  padding: 4px 10px;
+  border: 1px dashed var(--axis);
+  border-radius: 4px;
+  background: none;
+  color: var(--ink-2);
+  font: italic 700 13px/1.3 var(--display);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.add-open:hover { border-color: var(--accent); color: var(--ink); }
+.add-form fieldset { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.add-form input {
+  flex: 1 1 110px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--page);
+  color: var(--ink);
+  font: inherit;
+}
+.add-form input[name="symbol"] { flex-basis: 160px; }
+.add-form .add-go { border-color: var(--yellow); background: var(--yellow); color: #141414; font-weight: 600; }
+.add-form fieldset:disabled { opacity: 0.6; }
+.add-msg { margin: 6px 0 0; color: var(--ink-2); font-size: 12.5px; }
+.add-msg:empty { display: none; }
+.add-msg.error { color: var(--down); }
+.add-hint { margin: 4px 0 0; color: var(--muted); font-size: 11.5px; }
+
+/* A row just added lights up for a moment. */
+@keyframes just-added { from { background: color-mix(in srgb, var(--yellow) 45%, transparent); } }
+tr.just-added > * { animation: just-added 2.4s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  tr.just-added > * { animation: none; }
+}
+
+/* A note at the foot of the window: what just changed, and Undo. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: calc(100vw - 32px);
+  padding: 7px 7px 7px 14px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--yellow);
+  border-radius: 4px;
+  background: var(--surface);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  color: var(--ink);
+  transform: translateX(-50%);
+}
+.toast[hidden] { display: none; }
+.toast:has(> button[hidden]) { padding-right: 14px; }
+
 @container (max-width: 560px) {
   .c-range, .c-ext { display: none; }
   .oh:not(:empty) { display: block; }
