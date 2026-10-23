@@ -56,8 +56,12 @@ and every visitor's refreshes go to the data feeds through the one server.
   constituents over the period selected there: which ones lifted or dragged the index most, the same by sector,
   and a sortable table of every constituent with its weight.
 - **Company panel**: click a company's name in an index's panel for its price chart (the same eight periods,
-  each with its change), its P/E over time, its key figures and its financial statements by year and by
-  quarter (see SEC EDGAR below). It opens on the period the index panel was showing. "Back" returns to the index.
+  each with its change), its P/E over time, its valuation measures, its key figures and its financial
+  statements by year (led by the trailing twelve months) and by quarter (see SEC EDGAR below). It opens on the
+  period the index panel was showing. "Back" returns to the index.
+- **Valuation measures**: the nine Yahoo Finance shows (market cap, enterprise value, trailing and forward P/E,
+  PEG, P/S, P/B, EV/revenue, EV/EBITDA), today and at the end of each of the last five quarters (see
+  "Valuation measures" below). Both the search box and an index's panel open them.
 - **Search**: the box in the header finds any share, fund, index or future by its symbol or name, in any market
   the quote feed covers, and opens it in the company panel on five years. Arrow keys and Enter pick a match;
   Enter with none highlighted opens the first, or the text as a symbol when nothing matches. "/" anywhere on
@@ -164,9 +168,9 @@ The preferred order is Yahoo Finance, then CNBC, FRED and SEC EDGAR. In practice
 | Source | Used for | Notes |
 |---|---|---|
 | Yahoo Finance | Nothing | Its data service turns programs away (HTTP 429) while answering a browser on the same computer, and it does not let another site's page read it. Using it would mean disguising the server as a browser, which this project does not do. |
-| CNBC quote feed | Every live price, every chart and every change over a period; each company's key figures; the search box's matches | The working first source. No key needed. |
+| CNBC quote feed | Every live price, every chart and every change over a period; each company's key figures, market cap and forward P/E; the search box's matches | The working first source. No key needed. |
 | FRED | Treasury yield history, when CNBC has none | Official daily yields from the St. Louis Fed. See [fred.js](fred.js). |
-| SEC EDGAR | Company financial statements | As filed by the company. See [edgar.js](edgar.js). |
+| SEC EDGAR | Company financial statements, and the figures behind the valuation measures | As filed by the company. See [edgar.js](edgar.js). |
 | iShares | Index constituents and weights | Daily holdings files. See [holdings.js](holdings.js). |
 
 ### CNBC
@@ -191,10 +195,11 @@ five to ten apart, which shows in a change measured from one to the other.
 
 ### SEC EDGAR
 
-Clicking a company in an index's panel opens the company's own panel. Its key figures (market cap, P/E,
-dividend, margins and so on) come with its quote from CNBC. Its financial statements come from EDGAR, the
-SEC's filing database: revenue, profit, earnings per share, cash flow and the balance sheet for the last five
-fiscal years and six quarters, as the company filed them.
+Clicking a company in an index's panel opens the company's own panel. Its key figures (dividend, margins and
+so on) come with its quote from CNBC. Its financial statements come from EDGAR, the SEC's filing database:
+revenue, profit, earnings per share, cash flow and the balance sheet for the last five fiscal years and six
+quarters, as the company filed them. The years lead with the trailing twelve months (TTM) where the latest
+quarter ends after the last fiscal year: flows over the last four quarters, the balance sheet of the latest.
 
 - **Coverage**: companies registered with the SEC. That is every US-listed company, and foreign ones that file
   there (Novartis, SAP, Toyota), which report once a year. A company listed only abroad (Nestlé, Roche) has
@@ -235,10 +240,39 @@ filed with the SEC ([edgar.js](edgar.js), `trailingEarnings`).
   per share for recent years (Berkshire Hathaway); and when a foreign company's P/E from its filings is above
   1.5 times the feed's own or below two-thirds of it, which is taken to mean its depositary share stands for
   a different number of ordinary ones (Shell, BP). The panel says which.
-- **The feed's P/E**: the key figures show the feed's own P/E. For Apple, Microsoft and NVIDIA the two agreed
-  within 0.1 when this was written.
+- **The feed's P/E**: today's trailing P/E among the valuation measures is this line's latest figure. The
+  feed's own P/E stands in where there are no filed earnings to use. For Apple, Microsoft and NVIDIA the two
+  agreed within 0.1 when this was written.
 - The earnings come from the cached statements in `.cache/edgar`; copies made before this was added are
   fetched again once. The split factors are kept six hours.
+
+### Valuation measures
+
+The company panel lays out the valuation measures of Yahoo Finance's statistics page, worked out in
+[valuation.js](valuation.js) from the SEC filings and the quote feed, since Yahoo itself is not a source (see Data
+sources). The first column is today: today's price with the latest figures filed. The others are the
+ends of the last five quarters (years, for a company that reports once a year): the close on the period's last
+day with the figures to that day.
+
+- **Market cap**: today's is CNBC's. Earlier ones are carried back from it by the price and by the number of
+  shares the company filed, both brought into today's shares across splits, so buybacks show. Only the change
+  in the share count is used, which keeps companies with several share classes right. Where no count is filed
+  (Berkshire Hathaway), the price alone carries it back.
+- **Enterprise value**: market cap plus debt (long-term debt with the part due within a year, and short-term
+  borrowing) less cash and short-term investments, from the balance sheet on the day. Banks and some
+  conglomerates do not tag their debt as such (JPMorgan, Berkshire Hathaway), and have no enterprise value.
+- **Ratios**: trailing P/E is the price over the twelve months' diluted earnings per share, as on the P/E line;
+  P/S and EV/revenue use the twelve months' revenue; P/B uses shareholders' equity on the day; EV/EBITDA uses
+  operating income with depreciation and amortization added back over twelve months (or profit before tax
+  with interest added back too, for a company that files no operating income). Nothing is divided by a loss
+  or by negative equity.
+- **Forward P/E and PEG**: from CNBC, for today only. The PEG ratio is CNBC's P/E over the growth in earnings
+  per share that analysts' estimates expect for the next year; Yahoo's uses five years' expected growth, which
+  CNBC does not carry.
+- **Without filings in the listing's currency** (Nestlé, SAP in New York), the column for today is CNBC's own
+  figures, with no P/B and no earlier columns.
+- The filed figures come with the statements in `.cache/edgar`; copies made before this was added are fetched
+  again once. The daily closes are kept an hour.
 
 ### iShares
 

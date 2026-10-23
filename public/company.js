@@ -38,6 +38,19 @@ const STATEMENTS = [
   ]],
 ];
 const MARGINS = { grossMargin: 'grossProfit', operatingMargin: 'operatingIncome', netMargin: 'netIncome' };
+
+// The valuation measures in Yahoo's order; `money` ones are amounts, the rest ratios.
+const MEASURES = [
+  ['marketCap', 'Market cap', 'money'],
+  ['enterpriseValue', 'Enterprise value', 'money'],
+  ['pe', 'Trailing P/E'],
+  ['forwardPe', 'Forward P/E'],
+  ['peg', 'PEG ratio · next year'],
+  ['priceToSales', 'P/S · TTM'],
+  ['priceToBook', 'P/B'],
+  ['evToRevenue', 'EV / revenue · TTM'],
+  ['evToEbitda', 'EV / EBITDA · TTM'],
+];
 const VIEWS = { annual: 'Annual', quarterly: 'Quarterly' };
 
 // The P/E line is drawn from six months up. Earnings change once a quarter,
@@ -185,7 +198,7 @@ function peNote(data) {
       `P/E: the price over the twelve months' diluted earnings per share as filed with the SEC (${figure(latest.eps, 2)} ${earnings.currency} for the twelve months to ${longDate(latest.end)}), `
       + 'each report from the day it was filed, and earlier ones in today\'s shares across stock splits. '
       + 'Both lines start together on a ratio scale, so where they part, earnings have changed. Hover the chart for the P/E on any day. '
-      + 'There is no P/E while the twelve months show a loss. The P/E among the key figures is the quote feed\'s.');
+      + 'There is no P/E while the twelve months show a loss. Today\'s is the trailing P/E among the valuation measures.');
   }
   const why = {
     currency: () => `${data.name} reports its earnings in ${earnings.reported}, and this listing is priced in ${earnings.quoted}.`,
@@ -200,17 +213,19 @@ function stat(label, value) {
   return el('div', {}, el('dt', { text: label }), el('dd', { text: value }));
 }
 
-// The figures of a share's summary page, as far as the feed has them.
-function keyFigures(q) {
+// The figures of a share's summary page, as far as the feed has them. Those
+// among the valuation measures are left out when the measures are shown.
+function keyFigures(q, valued) {
   const s = q.stats ?? {};
   const money = (value) => (value == null ? null : `${large(value)} ${q.currency ?? ''}`.trim());
   const percent = (value) => (value == null ? null : `${figure(value, 2)}%`);
   const plain = (value) => (value == null ? null : figure(value, 2));
   const range = (low, high) => (low != null && high != null ? `${fmt(low, q.dp)} – ${fmt(high, q.dp)}` : null);
+  const unlessValued = (value) => (valued ? null : value);
   return [
-    ['Market cap', money(s.marketCap)],
-    ['P/E', plain(s.pe)],
-    ['Forward P/E', plain(s.forwardPe)],
+    ['Market cap', unlessValued(money(s.marketCap))],
+    ['P/E', unlessValued(plain(s.pe))],
+    ['Forward P/E', unlessValued(plain(s.forwardPe))],
     ['EPS · 12 months', plain(s.eps)],
     ['Dividend', s.dividend == null ? null : `${fmt(s.dividend, 2)}${s.dividendYield == null ? '' : ` (${fmt(s.dividendYield, 2)}%)`}`],
     ['Revenue · 12 months', money(s.revenue)],
@@ -219,7 +234,7 @@ function keyFigures(q) {
     ['Net margin', percent(s.netMargin)],
     ['Return on equity', percent(s.returnOnEquity)],
     ['Debt / equity', percent(s.debtToEquity)],
-    ['P/S', plain(s.priceToSales)],
+    ['P/S', unlessValued(plain(s.priceToSales))],
     ['Beta', plain(s.beta)],
     ['Shares outstanding', large(s.sharesOutstanding)],
     ['Volume', s.volume == null ? null : `${large(s.volume)}${s.averageVolume == null ? '' : ` (10-day average ${large(s.averageVolume)})`}`],
@@ -229,9 +244,52 @@ function keyFigures(q) {
   ].filter(([, value]) => value != null).map(([label, value]) => stat(label, value));
 }
 
+// Yahoo's valuation measures, today's and at the end of each recent period
+// (see valuation.js): a table with a row per measure, today first.
+function valuationTable({ currency, kind, dates, rows }) {
+  const cell = (value, money) => {
+    if (value == null) return el('td', { class: 'na', text: '—' });
+    return el('td', { class: value < 0 ? 'down' : '', text: money ? large(value) : figure(value, 2) });
+  };
+  const head = el('tr', {}, el('th', { scope: 'col', text: currency ?? '' }),
+    ...dates.map((end) => (end == null
+      ? el('th', { scope: 'col', title: 'Today\'s price with the latest figures filed', text: 'Current' })
+      : el('th', { scope: 'col', title: `The close on ${longDate(end)}, the end of the ${kind === 'year' ? 'fiscal year' : 'quarter'}, with the figures to that day`, text: monthOf(end) }))));
+  const body = el('tbody');
+  for (const [name, label, money] of MEASURES) {
+    body.append(el('tr', {}, el('th', { scope: 'row', text: label }), ...rows[name].map((value) => cell(value, money))));
+  }
+  return el('table', { class: 'c-table', style: `--cols: ${dates.length}` }, el('thead', {}, head), body);
+}
+
+// What the valuation measures are made of, and what they lack.
+function valuationNote(data) {
+  const { valuation, filings, earnings } = data;
+  const peg = 'The PEG ratio is the feed\'s P/E over the growth in earnings per share that analysts\' estimates expect for the next year; Yahoo\'s uses their five-year growth, which the feed does not carry.';
+  if (valuation.source === 'feed') {
+    const why = filings.status === 'ok' && filings.currency !== valuation.currency
+      ? `${data.name} files its statements in ${filings.currency} and this listing is priced in ${valuation.currency}`
+      : 'without recent statements filed with the SEC';
+    return el('p', { class: 'd-note', text: `From the quote feed, for today only: ${why}, there are no earlier periods to value it at. ${peg}` });
+  }
+  const { rows } = valuation;
+  return el('p', { class: 'd-note' },
+    'Current is today\'s price with the latest figures filed with the SEC; each earlier column is the close on the period\'s last day with the figures to it. '
+    + 'Market cap is the quote feed\'s, carried back by the price and the number of shares the company filed. '
+    + 'Enterprise value adds debt and takes off cash and short-term investments. '
+    + 'Sales, revenue and EBITDA (operating income with depreciation and amortization added back) are the twelve months\' (TTM), book value is shareholders\' equity on the day. '
+    + (earnings.status === 'ok' ? '' : 'The trailing P/E today is the quote feed\'s, and there is none earlier. ')
+    + (rows.enterpriseValue[0] == null && rows.marketCap[0] != null ? 'The company does not tag its debt in its filings (as is usual for a bank), so there is no enterprise value. ' : '')
+    + `The forward P/E is the quote feed's, from analysts' estimates. ${peg}`);
+}
+
 // One view of the statements as a table: a column per period, newest first.
+// The years lead with the twelve months to the latest quarter (TTM) where
+// that ends after the last fiscal year.
 function statementTable(filings, view) {
-  const { periods, rows } = filings[view];
+  const ttm = view === 'annual' ? filings.ttm : null;
+  const periods = [...(ttm ? [ttm.end] : []), ...filings[view].periods];
+  const rows = Object.fromEntries(Object.entries(filings[view].rows).map(([line, values]) => [line, ttm ? [ttm.rows[line] ?? null, ...values] : values]));
   const all = { ...rows };
   for (const [margin, line] of Object.entries(MARGINS)) {
     all[margin] = periods.map((_, i) => (rows[line]?.[i] != null && rows.revenue?.[i] ? (rows[line][i] / rows.revenue[i]) * 100 : null));
@@ -251,7 +309,9 @@ function statementTable(filings, view) {
   };
 
   const head = el('tr', {}, el('th', { scope: 'col', text: `${filings.currency} ${unitName}` }),
-    ...periods.map((end) => el('th', { scope: 'col', title: `${view === 'annual' ? 'Fiscal year' : 'Quarter'} to ${longDate(end)}`, text: monthOf(end) })));
+    ...periods.map((end, i) => (ttm && i === 0
+      ? el('th', { scope: 'col', title: `Twelve months to ${longDate(end)}, with the balance sheet on that day`, text: 'TTM' })
+      : el('th', { scope: 'col', title: `${view === 'annual' ? 'Fiscal year' : 'Quarter'} to ${longDate(end)}`, text: monthOf(end) }))));
   const body = el('tbody');
   for (const [title, lines] of STATEMENTS) {
     const filedLines = lines.filter(([line]) => all[line]?.some((value) => value != null));
@@ -289,8 +349,9 @@ function statements(filings) {
     toggle.append(button);
   }
   const { latest } = filings;
+  const ttm = open.view === 'annual' && filings.ttm ? `TTM is the twelve months to ${longDate(filings.ttm.end)}: the last four quarters added up, with the balance sheet of the latest. ` : '';
   const source = el('p', { class: 'd-note' },
-    `As filed with the SEC by ${filings.entity} under ${filings.standard}. The latest report is a ${latest.form} filed on ${longDate(latest.filed)} for the period to ${longDate(latest.period)}. Where a company files a quarter only as part of a running total, it is worked out by subtraction. Checked for a new report once a quarter. `,
+    `As filed with the SEC by ${filings.entity} under ${filings.standard}. The latest report is a ${latest.form} filed on ${longDate(latest.filed)} for the period to ${longDate(latest.period)}. Where a company files a quarter only as part of a running total, it is worked out by subtraction. ${ttm}Checked for a new report once a quarter. `,
     el('a', { href: filings.url, target: '_blank', rel: 'noopener', text: 'All filings at the SEC' }), '.');
   return [el('div', { class: 'c-head' }, toggle), el('div', { class: 'c-scroll' }, statementTable(filings, open.view)), source];
 }
@@ -311,12 +372,15 @@ function render() {
   const body = $('#c-body');
   if (error) return body.replaceChildren(el('p', { class: 'd-note warn', text: `Could not load this company (${error}).` }));
   if (!data) return body.replaceChildren(el('p', { class: 'd-note', text: 'Loading the company\'s figures…' }));
-  // A fund, an index or a future found with the search box has no statements to speak of.
+  // A fund, an index or a future found with the search box has no statements
+  // or valuation to speak of.
   const company = !row.type || ['STOCK', 'CSRT'].includes(row.type) || data.filings.status === 'ok';
+  const valued = company && Object.values(data.valuation.rows).some((values) => values.some((value) => value != null));
   return body.replaceChildren(
     ...[peNote(data)].filter(Boolean),
+    ...(valued ? [el('h3', { text: 'Valuation measures' }), el('div', { class: 'c-scroll' }, valuationTable(data.valuation)), valuationNote(data)] : []),
     el('h3', { text: 'Key figures' }),
-    el('dl', { class: 'd-stats' }, ...keyFigures(q)),
+    el('dl', { class: 'd-stats' }, ...keyFigures(q, valued)),
     el('p', { class: 'd-note', text: 'From the quote feed.' }),
     ...(company ? [el('h3', { text: 'Financial statements' }), ...statements(data.filings)] : []),
   );

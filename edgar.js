@@ -70,6 +70,53 @@ const AT_A_DATE = {
   debt: { 'us-gaap': ['LongTermDebt', 'LongTermDebtNoncurrent'], 'ifrs-full': ['NoncurrentPortionOfNoncurrentBorrowings', 'Borrowings'] },
 };
 
+// What valuing the company at a period's end takes besides the statements
+// (see valuation.js). EBITDA is operating income with depreciation and
+// amortization added back; for a company that files no operating income (an
+// oil major), the profit before tax with interest added back too.
+const DEPRECIATION = {
+  // Depreciation alone, last, for the few that file nothing broader (Alphabet).
+  'us-gaap': ['DepreciationDepletionAndAmortization', 'DepreciationAmortizationAndAccretionNet', 'DepreciationAndAmortization', 'Depreciation'],
+  'ifrs-full': ['DepreciationAndAmortisationExpense', 'AdjustmentsForDepreciationAndAmortisationExpense', 'DepreciationAmortisationAndImpairmentLossReversalOfImpairmentLossRecognisedInProfitOrLoss', 'AdjustmentsForDepreciationExpense'],
+};
+const PRETAX = {
+  'us-gaap': ['IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest', 'IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments'],
+  'ifrs-full': ['ProfitLossBeforeTax'],
+};
+const INTEREST = { 'us-gaap': ['InterestExpense', 'InterestExpenseNonoperating', 'InterestExpenseDebt'], 'ifrs-full': ['FinanceCosts'] };
+// All debt: long-term debt including the part due within a year (else its two
+// parts added up), and short-term borrowing besides. IFRS has one total for all of it.
+const DEBT = {
+  'us-gaap': {
+    total: ['LongTermDebt'],
+    noncurrent: ['LongTermDebtNoncurrent', 'LongTermDebtAndCapitalLeaseObligations'],
+    current: ['LongTermDebtCurrent', 'LongTermDebtAndCapitalLeaseObligationsCurrent'],
+    short: ['ShortTermBorrowings', 'CommercialPaper'],
+  },
+  'ifrs-full': {
+    total: ['Borrowings'],
+    noncurrent: ['NoncurrentBorrowings', 'LongtermBorrowings', 'NoncurrentPortionOfNoncurrentBorrowings'],
+    current: ['CurrentBorrowings', 'ShorttermBorrowings', 'CurrentPortionOfNoncurrentBorrowings'],
+    short: [],
+  },
+};
+// Cash with the short-term investments that are as good as cash: the cash
+// that enterprise value takes off.
+const CASH = {
+  'us-gaap': { total: ['CashCashEquivalentsAndShortTermInvestments'], investments: ['MarketableSecuritiesCurrent', 'ShortTermInvestments', 'AvailableForSaleSecuritiesDebtSecuritiesCurrent', 'DebtSecuritiesCurrent'] },
+  'ifrs-full': { total: [], investments: ['CurrentInvestments'] },
+};
+// The number of shares, three ways, by the taxonomy each is filed in: on the
+// balance sheet's date, on the report's cover (a few weeks after it), and
+// averaged over the period as earnings per share are.
+const SHARES = {
+  date: { 'us-gaap': ['CommonStockSharesOutstanding'], 'ifrs-full': ['NumberOfSharesOutstanding'] },
+  cover: { dei: ['EntityCommonStockSharesOutstanding'] },
+  average: { 'us-gaap': ['WeightedAverageNumberOfDilutedSharesOutstanding', 'WeightedAverageNumberOfSharesOutstandingBasic'], 'ifrs-full': ['AdjustedWeightedAverageShares', 'WeightedAverageShares'] },
+};
+const VALUED = 5; // the periods valued, besides today
+const COVER_DAYS = 120; // a report's cover dates its share count within this many days of the period's end
+
 const days = (from, to) => Math.round((Date.parse(to) - Date.parse(from)) / DAY_MS) + 1;
 const isQuarter = (length) => length >= 80 && length <= 100;
 const isYear = (length) => length >= 350 && length <= 380;
@@ -171,6 +218,82 @@ function onDate(list, date) {
   return near ? near.val : null;
 }
 
+// A figure over the twelve months to a period's end: the fiscal year that
+// ends then, or the four quarters that do.
+function twelveMonths({ annual, quarterly }, end) {
+  if (annual.has(end)) return annual.get(end);
+  const four = [...quarterly.keys()].filter((q) => q <= end).sort().slice(-4);
+  // Four quarters in a row: the first closes about nine months before the last.
+  const span = four.length === 4 ? days(four[0], end) : 0;
+  return four[3] === end && span >= 260 && span <= 290 ? four.reduce((sum, q) => sum + quarterly.get(q), 0) : null;
+}
+
+// The number of shares on a period's end, from a list filed in one of the
+// ways SHARES names.
+function sharesOn(kind, list, end) {
+  const t = Date.parse(end);
+  if (kind === 'date') return onDate(list, end);
+  if (kind === 'cover') {
+    const covers = list.filter((fact) => Date.parse(fact.end) > t && Date.parse(fact.end) <= t + COVER_DAYS * DAY_MS);
+    return covers.length ? covers.reduce((a, b) => (b.end < a.end ? b : a)).val : null;
+  }
+  // The average over the quarter to that day, else over the year: a fourth
+  // quarter's is filed only as the year's.
+  const over = list.filter((fact) => fact.start && Math.abs(Date.parse(fact.end) - t) <= 5 * DAY_MS);
+  return (over.find((fact) => isQuarter(days(fact.start, fact.end))) ?? over.find((fact) => isYear(days(fact.start, fact.end))))?.val ?? null;
+}
+
+// What valuing the company at the end of each period in `ends` takes (see
+// valuation.js): the twelve months' revenue and EBITDA to then, its equity,
+// debt and cash on the day, and its number of shares.
+function valuationBasis(company, { standard, currency }, flows, balances, ends) {
+  const facts = company.facts[standard];
+  const listed = (groups) => Object.fromEntries(Object.entries(groups).map(([part, tags]) => [part, filed(facts, tags, currency)]));
+  const [depreciation, pretax, interest] = [DEPRECIATION, PRETAX, INTEREST].map((tags) => overPeriods(filed(facts, tags[standard], currency)));
+  const debt = listed(DEBT[standard]);
+  const cash = listed(CASH[standard]);
+
+  const ebitdaTo = (end) => {
+    const addedBack = twelveMonths(depreciation, end);
+    const operating = twelveMonths(flows.operatingIncome, end);
+    const beforeTax = twelveMonths(pretax, end);
+    if (addedBack == null) return null;
+    if (operating != null) return operating + addedBack;
+    return beforeTax == null ? null : beforeTax + (twelveMonths(interest, end) ?? 0) + addedBack;
+  };
+  // Where a company does not tag its long-term debt (a bank, a conglomerate
+  // that files it by business), the debt is not known: no figure, not none.
+  const debtOn = (end) => {
+    const noncurrent = onDate(debt.noncurrent, end);
+    const long = onDate(debt.total, end) ?? (noncurrent == null ? null : noncurrent + (onDate(debt.current, end) ?? 0));
+    return long == null ? null : long + (onDate(debt.short, end) ?? 0);
+  };
+  const cashOn = (end) => {
+    const own = onDate(balances.cash, end);
+    return onDate(cash.total, end) ?? (own == null ? null : own + (onDate(cash.investments, end) ?? 0));
+  };
+  // Only the changes in the number of shares are used (see valuation.js), so
+  // it is counted one way throughout: the way that covers the latest period
+  // and the most of the others.
+  const counts = Object.entries(SHARES).map(([kind, tags]) => {
+    const [taxonomy, names] = Object.entries(tags).find(([name]) => name === 'dei' || name === standard) ?? [];
+    const list = names ? filed(company.facts[taxonomy], names, 'shares') : [];
+    return ends.map((end) => sharesOn(kind, list, end));
+  });
+  const covered = (count) => count.filter((n) => n != null).length;
+  const shares = counts.filter((count) => count[0] != null).reduce((best, count) => (!best || covered(count) > covered(best) ? count : best), null);
+
+  return ends.map((end, i) => ({
+    end,
+    revenue: twelveMonths(flows.revenue, end),
+    ebitda: ebitdaTo(end),
+    equity: onDate(balances.equity, end),
+    debt: debtOn(end),
+    cash: cashOn(end),
+    shares: shares?.[i] ?? null,
+  }));
+}
+
 // The statements laid out for the page: the latest fiscal years and quarters,
 // newest first, one row of figures per line item.
 export function distill(company) {
@@ -186,19 +309,25 @@ export function distill(company) {
   const balances = {};
   for (const [name, tags] of Object.entries(AT_A_DATE)) balances[name] = filed(facts, tags[basis.standard], basis.currency);
 
-  const table = (kind, count) => {
-    // The periods are those the company reported a profit for.
-    const periods = [...flows.netIncome[kind].keys()].sort().reverse().slice(0, count);
+  // One row of figures per line item for the periods ending on `ends`, a
+  // figure over a period taken by `over`: its fiscal year, its quarter, or
+  // the twelve months to its end.
+  const lines = (ends, over) => {
     const rows = {};
-    for (const [name, flow] of Object.entries(flows)) rows[name] = periods.map((end) => flow[kind].get(end) ?? null);
-    for (const [name, list] of Object.entries(balances)) rows[name] = periods.map((end) => onDate(list, end));
+    for (const [name, flow] of Object.entries(flows)) rows[name] = ends.map((end) => over(flow, end));
+    for (const [name, list] of Object.entries(balances)) rows[name] = ends.map((end) => onDate(list, end));
     // Not every company files a gross profit; revenue less its cost is the same figure.
     rows.grossProfit = rows.grossProfit.map((value, i) => value ?? (rows.revenue[i] != null && rows.costOfRevenue[i] != null ? rows.revenue[i] - rows.costOfRevenue[i] : null));
     delete rows.costOfRevenue;
     // Total liabilities are not always filed as such; assets less equity is the same figure.
     rows.liabilities = rows.liabilities.map((value, i) => value ?? (rows.assets[i] != null && rows.equity[i] != null ? rows.assets[i] - rows.equity[i] : null));
-    rows.freeCashFlow = periods.map((_, i) => (rows.operatingCashFlow[i] != null && rows.capex[i] != null ? rows.operatingCashFlow[i] - rows.capex[i] : null));
-    return { periods, rows };
+    rows.freeCashFlow = ends.map((_, i) => (rows.operatingCashFlow[i] != null && rows.capex[i] != null ? rows.operatingCashFlow[i] - rows.capex[i] : null));
+    return rows;
+  };
+  const table = (kind, count) => {
+    // The periods are those the company reported a profit for.
+    const periods = [...flows.netIncome[kind].keys()].sort().reverse().slice(0, count);
+    return { periods, rows: lines(periods, (flow, end) => flow[kind].get(end) ?? null) };
   };
 
   // The filing the newest figures come from.
@@ -207,6 +336,14 @@ export function distill(company) {
   // A foreign filer reports once a year; the odd quarter it tagged years ago
   // is not a quarterly record. Quarters are shown only if they run up to date.
   const current = quarterly.periods.length > 0 && (!annual.periods.length || Date.parse(quarterly.periods[0]) > Date.parse(annual.periods[0]) - 100 * DAY_MS);
+  // The years lead with the twelve months to the latest quarter, where that
+  // ends after the last fiscal year: flows over the last four quarters, the
+  // balance sheet of that quarter.
+  const ttmEnd = current && (!annual.periods.length || quarterly.periods[0] > annual.periods[0]) ? quarterly.periods[0] : null;
+  const ttm = ttmEnd && { end: ttmEnd, rows: Object.fromEntries(Object.entries(lines([ttmEnd], twelveMonths)).map(([name, [value]]) => [name, value])) };
+  // Valued at the ends of the latest quarters, or of the latest years for a
+  // company that reports once a year.
+  const valued = (current ? quarterly : annual).periods.slice(0, VALUED);
 
   // The filing the newest figures come from. It repeats last year's for
   // comparison, so within it the latest period is the one it reports.
@@ -221,7 +358,9 @@ export function distill(company) {
     currency: basis.currency,
     latest: newest && { form: newest.form, filed: newest.filed, period: newest.end },
     annual,
+    ttm,
     quarterly: current ? quarterly : { periods: [], rows: {} },
+    valuation: { kind: current ? 'quarter' : 'year', periods: valuationBasis(company, basis, flows, balances, valued) },
     // Earnings per share as filed, for the P/E line (see trailingEarnings).
     eps: everyFiling(facts, OVER_A_PERIOD.eps[basis.standard], perShare, new Date(Date.now() - EPS_YEARS * 366 * DAY_MS).toISOString().slice(0, 10)),
   };
@@ -259,20 +398,13 @@ export function trailingEarnings(eps, splitFactor) {
       .filter((fact) => Math.abs(fact.val - newest.val) <= rounding)
       .reduce((best, fact) => (Math.abs(fact.raw) > Math.abs(best.raw) ? fact : best), newest);
   });
-  const { annual, quarterly } = overPeriods(chosen);
+  const flow = overPeriods(chosen);
   const firstFiled = new Map();
   for (const [, end, , filed] of eps) if (!firstFiled.has(end) || filed < firstFiled.get(end)) firstFiled.set(end, filed);
 
-  const quarters = [...quarterly.keys()].sort();
   const trailing = [];
-  for (const end of [...new Set([...annual.keys(), ...quarters])].sort()) {
-    let value = annual.get(end);
-    if (value == null) {
-      const four = quarters.filter((q) => q <= end).slice(-4);
-      // Four quarters in a row: the first closes about nine months before the last.
-      const span = four.length === 4 ? days(four[0], end) : 0;
-      if (four[3] === end && span >= 260 && span <= 290) value = four.reduce((sum, q) => sum + quarterly.get(q), 0);
-    }
+  for (const end of [...new Set([...flow.annual.keys(), ...flow.quarterly.keys()])].sort()) {
+    const value = twelveMonths(flow, end);
     if (value != null) trailing.push({ at: firstFiled.get(end), end, eps: Number(value.toFixed(4)) });
   }
   // A period filed late (an amendment, a first report covering several years)
@@ -375,7 +507,7 @@ export function createEdgar({ contact, cacheDir }) {
   // quarterly reports). They are fetched again when the copy on disk is a
   // quarter old, or weekly once the next report is overdue.
   function due(kept) {
-    if (!kept.statements.eps) return true; // kept before earnings per share were
+    if (!kept.statements.eps || !kept.statements.valuation) return true; // kept before earnings per share, or valuation figures, were
     const age = Date.now() - kept.at;
     if (age > QUARTER_MS) return true;
     const between = kept.statements.quarterly.periods.length ? 100 : 480;
