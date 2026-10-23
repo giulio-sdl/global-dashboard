@@ -62,7 +62,8 @@ and every visitor's refreshes go to the data feeds through the one server.
   Enter with none highlighted opens the first, or the text as a symbol when nothing matches. "/" anywhere on
   the page puts the cursor in the box. A company listed in several countries is offered once, in its home
   market; type another listing's symbol (`AAPL-CH`) to get that one. Funds, indexes and futures have their
-  chart and key figures, without statements.
+  chart and key figures, without statements. When the lookup cannot be reached the box says so, rather than
+  "No matches", and asks again every five seconds while the cursor is in it.
 - **P/E line**: on six months and longer, a company's chart carries its P/E: each price over the twelve months'
   diluted earnings per share known on that day, from its SEC filings (see "P/E over time" below).
 - **How constituent contributions are worked out**: a name's contribution is its weight at the start of the
@@ -147,6 +148,11 @@ The preferred order is Yahoo Finance, then CNBC, FRED and SEC EDGAR. In practice
 Quotes and intraday bars come from CNBC's public quote feed, proxied and cached by [server.js](server.js)
 (quotes 10 s, intraday charts 3 min, longer history 10 min to 6 h). It needs no API key. US cash indexes, ETFs and currencies are real-time; other indexes,
 futures and commodities are delayed by roughly 10–20 minutes.
+
+The Mac's own resolver sometimes says one of CNBC's hosts does not exist, for a minute or so at a time, while
+the DNS server answers for it as usual; on 2026-10-23 that took out the search box's lookup
+(`symlookup.cnbc.com`) and nothing else. A request that fails that way is made again with the host's address
+asked of the DNS server directly.
 
 ### FRED
 
