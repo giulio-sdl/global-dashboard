@@ -651,6 +651,12 @@ dialog.detail h2::before, dialog.detail h2::after { content: none; }
 .dq-last { font: 700 34px/1.15 var(--digits); }
 .dq-chg { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .dq-time { color: var(--ink-2); font-size: 12px; }
+/* Pre-market or after-hours trading, under the session's price, with the yellow light of the exchange status. */
+.d-ext { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; margin: 2px 0 0; }
+.d-ext .dot { align-self: center; }
+.d-ext b { font: italic 700 13px/1.2 var(--display); letter-spacing: 0.06em; text-transform: uppercase; }
+.dx-last { font: 700 19px/1.2 var(--digits); }
+.dx-chg { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 
 /* Key figures beside the rev counter. */
 .d-overview { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px 28px; margin: 4px 0 16px; }

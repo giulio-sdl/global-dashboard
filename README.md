@@ -59,6 +59,11 @@ and every visitor's refreshes go to the data feeds through the one server.
   each with its change), its P/E over time, its valuation measures, its key figures and its financial
   statements by year (led by the trailing twelve months) and by quarter (see SEC EDGAR below). It opens on the
   period the index panel was showing. "Back" returns to the index.
+- **Pre-market and after-hours**: a US-listed share or fund opened in either panel shows its latest trade
+  outside the regular session under the session's price, with the yellow light of the exchange status: the
+  price, its change from where the regular session left off, the time and the volume. The evening's after-hours
+  trade stays until the next pre-market one, and that one until the regular session trades again. The feed
+  carries none for other markets, nor for indexes, futures and currencies.
 - **Valuation measures**: the nine Yahoo Finance shows (market cap, enterprise value, trailing and forward P/E,
   PEG, P/S, P/B, EV/revenue, EV/EBITDA), today and at the end of each of the last five quarters (see
   "Valuation measures" below). Both the search box and an index's panel open them.

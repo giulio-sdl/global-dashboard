@@ -4,7 +4,7 @@
 // opens on top of the index panel and closes back to it.
 import { chartFigure } from './figure.js';
 import { changeText, lineView } from './periods.js';
-import { $, el, fmt, getJson, signed, timeLabel } from './util.js';
+import { $, el, fmt, getJson, renderExtended, signed, timeLabel } from './util.js';
 
 const dialog = $('#company');
 const chart = chartFigure($('.d-chart', dialog), (period) => { if (open) showChart(period); });
@@ -376,6 +376,7 @@ function render() {
   moved.textContent = q ? `${signed(q.change, q.dp).text} (${move.text})` : '';
   moved.className = `dq-chg ${move.dir}`;
   $('.dq-time', dialog).textContent = q ? [q.currency, 'latest session', timeLabel(q.time)].filter(Boolean).join(' · ') : '';
+  renderExtended($('.d-ext', dialog), q);
 
   drawChart();
   const body = $('#c-body');
