@@ -184,7 +184,7 @@ function peNote(data) {
     return el('p', { class: 'd-note' },
       `P/E: the price over the twelve months' diluted earnings per share as filed with the SEC (${figure(latest.eps, 2)} ${earnings.currency} for the twelve months to ${longDate(latest.end)}), `
       + 'each report from the day it was filed, and earlier ones in today\'s shares across stock splits. '
-      + 'Both lines start together on a ratio scale, so where they part, earnings have changed; each line\'s high and low are marked on its side. '
+      + 'Both lines start together on a ratio scale, so where they part, earnings have changed. Hover the chart for the P/E on any day. '
       + 'There is no P/E while the twelve months show a loss. The P/E among the key figures is the quote feed\'s.');
   }
   const why = {

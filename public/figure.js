@@ -36,8 +36,6 @@ export function chartFigure(figure, onPeriod) {
   const svg = lineSvg('spark big', true);
   const plot = $('.d-plot', figure);
   plot.prepend(svg);
-  // The second line's high and low, on the right.
-  plot.append(el('span', { class: 'd-hi2' }), el('span', { class: 'd-lo2' }));
   const buttons = $('.ranges', figure);
   for (const period of PERIODS) buttons.append(el('button', { type: 'button', 'data-period': period, 'aria-pressed': 'false', title: PERIOD_NAME[period], text: PERIOD_SHORT[period] }));
   buttons.addEventListener('click', (event) => {
@@ -83,10 +81,10 @@ export function chartFigure(figure, onPeriod) {
       drawn ? `${both ? `Price and ${second.label}` : 'Price'}, ${span}` : busy ? 'Loading the chart…' : 'No chart data for this period',
       el('span', { class: `chip ${moved.dir}`, title: span === 'intraday' ? 'Change on the day' : `Change over ${span}`, text: moved.text }),
     );
-    // Alone, the line's scale is read off the top and bottom edges; with the
-    // P/E, each line's high and low are marked on its own side.
-    place($('.d-hi', figure), $('.d-lo', figure), drawn && (drawn.levels?.main ?? [{ value: drawn.hi }, { value: drawn.lo }]), dp);
-    place($('.d-hi2', figure), $('.d-lo2', figure), drawn?.levels?.second, second?.dp);
+    // Alone, the price is read off the top and bottom edges; with the P/E,
+    // its high and low are marked where they are. The P/E's one figure is the
+    // legend's, and the tooltip gives it for any day.
+    place($('.d-hi', figure), $('.d-lo', figure), drawn && (drawn.levels ?? [{ value: drawn.hi }, { value: drawn.lo }]), dp);
     $('.d-from', figure).textContent = drawn ? pointLabel(view.t[0], view.step) : '';
     $('.d-to', figure).textContent = drawn ? pointLabel(view.t.at(-1), view.step) : '';
 

@@ -68,9 +68,9 @@ function extremes(list) {
 // each point, or null where it has none (a P/E while there are losses). The
 // two then share one ratio scale: the second is rebased to start where the
 // first does, and the same change in percent moves either line as far, so
-// where they part the ratio between them has changed. Neither line can then be
-// read off the edges of the plot, so the range returned has `levels` instead:
-// each line's high and low, { value, y } with y a fraction of the height down.
+// where they part the ratio between them has changed. The edges of the plot
+// are then no longer the first line's, so the range returned has `levels`:
+// its high and low, { value, y } with y a fraction of the height down.
 export function plotLine(svg, series, { w, h, pad }) {
   const { t, c, base, move = 0, second } = series;
   if (!c || c.length < 2) {
@@ -114,8 +114,7 @@ export function plotLine(svg, series, { w, h, pad }) {
   svg.plot = { t, c, xs, ys, base, dp: series.dp, step: series.step, w, h, pad, second: rebased && { ...second, ys: ys2 } };
   svg.removeAttribute('hidden');
   if (!rebased) return { lo, hi };
-  const levels = (values, raw) => extremes(values).map((i) => ({ value: raw[i], y: y(values[i]) / h }));
-  return { lo: Math.exp(lo), hi: Math.exp(hi), levels: { main: levels(main, c), second: levels(other, second.c) } };
+  return { lo: Math.exp(lo), hi: Math.exp(hi), levels: extremes(main).map((i) => ({ value: c[i], y: y(main[i]) / h })) };
 }
 
 // Intraday and hourly points carry a time; daily and weekly closes only a date.
