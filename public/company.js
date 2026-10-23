@@ -1,13 +1,14 @@
-// The company panel: one constituent of an index, with its price chart, its
-// key figures from the quote feed and its financial statements as filed with
-// the SEC. It opens on top of the index panel and closes back to it.
+// The company panel: one constituent of an index, or any share found with the
+// search box, with its price chart and P/E, its key figures from the quote
+// feed and its financial statements as filed with the SEC. From an index it
+// opens on top of the index panel and closes back to it.
 import { chartFigure } from './figure.js';
 import { changeText, lineView } from './periods.js';
 import { $, el, fmt, getJson, signed, timeLabel } from './util.js';
 
 const dialog = $('#company');
 const chart = chartFigure($('.d-chart', dialog), (period) => { if (open) showChart(period); });
-let open = null; // the company on show: { index, row, data, error, view, period, lines (by period) }
+let open = null; // the company on show: { index (null from the search box), row, data, error, view, period, lines (by period) }
 let request = null; // its requests, dropped if another company is opened
 
 // The statements, line by line. `eps` is per share; a margin is one line over
@@ -39,6 +40,13 @@ const STATEMENTS = [
 const MARGINS = { grossMargin: 'grossProfit', operatingMargin: 'operatingIncome', netMargin: 'netIncome' };
 const VIEWS = { annual: 'Annual', quarterly: 'Quarterly' };
 
+// The P/E line is drawn from six months up. Earnings change once a quarter,
+// so over a shorter period it would mostly retrace the price.
+const PE_FROM = new Set(['6m', '1y', '5y', '10y']);
+// A twelve-month figure stands until the next report; one whose year ended
+// longer ago than this (a company that has stopped filing) gives no P/E.
+const EARNINGS_KEPT_MS = 550 * 24 * 3600_000;
+
 // 4,913,000,000,000 reads 4.91T.
 function large(value) {
   if (value == null) return null;
@@ -55,6 +63,26 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 const monthOf = (iso) => `${MONTHS[Number(iso.slice(5, 7)) - 1]} ${iso.slice(0, 4)}`;
 const longDate = (iso) => `${Number(iso.slice(8, 10))} ${monthOf(iso)}`;
 
+// The twelve months' earnings per share known at a time: from the last report
+// filed by then (see trailingEarnings in edgar.js), while it is recent enough.
+function earningsAt(trailing, time) {
+  let known = null;
+  for (const entry of trailing) {
+    if (Date.parse(entry.at) > time) break;
+    known = entry;
+  }
+  return known && time - Date.parse(known.end) <= EARNINGS_KEPT_MS ? known : null;
+}
+
+// The P/E at a time and price; none while the twelve months show a loss.
+function peAt(trailing, time, price) {
+  const known = earningsAt(trailing, time);
+  return known && known.eps > 0 ? price / known.eps : null;
+}
+
+// The query naming the company: from an index's panel, with the index.
+const asked = ({ index, row }) => `${index ? `index=${encodeURIComponent(index.symbol)}&` : ''}symbol=${encodeURIComponent(row.symbol)}`;
+
 export function initCompany() {
   $('#company-close').addEventListener('click', () => dialog.close());
   // A click on the backdrop lands on the dialog element itself.
@@ -68,7 +96,8 @@ export function initCompany() {
 
 // `index` is the row of the dashboard the company was reached from, `row` its
 // line among that index's constituents. The chart opens on `period`: the one
-// the index panel was showing.
+// the index panel was showing. From the search box `index` is null and `row`
+// the result picked, { symbol, name, type, exchange }.
 export async function openCompany(index, row, period = '1d') {
   request?.abort();
   request = new AbortController();
@@ -78,12 +107,12 @@ export async function openCompany(index, row, period = '1d') {
   chart.loading(true);
   $('#company-title').textContent = row.name;
   // On a phone the button only says "Back", to leave the name its room.
-  $('#company-close').replaceChildren('Back', el('span', { class: 'c-wide', text: ` to ${index.name}` }));
+  $('#company-close').replaceChildren(...(index ? ['Back', el('span', { class: 'c-wide', text: ` to ${index.name}` })] : ['Close']));
   render();
   if (!dialog.open) dialog.showModal();
   dialog.scrollTop = 0;
   try {
-    const { company } = await getJson(`/api/company?index=${encodeURIComponent(index.symbol)}&symbol=${encodeURIComponent(row.symbol)}`, request.signal);
+    const { company } = await getJson(`/api/company?${asked(mine)}`, request.signal);
     if (open !== mine) return;
     mine.data = company;
   } catch (err) {
@@ -107,7 +136,7 @@ async function showChart(period) {
   if (!mine.data || mine.lines[period] || mine.waiting.has(period)) return;
   mine.waiting.add(period);
   try {
-    const answer = await getJson(`/api/chart?index=${encodeURIComponent(mine.index.symbol)}&symbol=${encodeURIComponent(mine.row.symbol)}&range=${period}`, request.signal);
+    const answer = await getJson(`/api/chart?${asked(mine)}&range=${period}`, request.signal);
     mine.lines[period] = answer.chart;
   } catch {
     // The chart area says there is no data; pressing the period again asks once more.
@@ -125,7 +154,46 @@ function drawChart() {
   const q = open.data?.quote;
   const line = open.lines[period];
   const change = !q ? null : period === '1d' ? q.changePct : line?.from != null ? (q.last / line.from - 1) * 100 : null;
-  chart.draw({ view: q ? lineView(period, line?.spark, q, Date.now()) : {}, period, name: row.name, dp: q?.dp ?? row.dp, change });
+  const view = q ? lineView(period, line?.spark, q, Date.now()) : {};
+  chart.draw({ view, period, name: row.name, dp: q?.dp ?? row.dp, change, second: peLine(view, period) });
+}
+
+// The P/E over the line on show, a figure for each point: the price there over
+// the twelve months' earnings per share known by then. Prices and earnings are
+// both in today's shares, so a stock split is no break in it.
+function peLine(view, period) {
+  const earnings = open.data?.earnings;
+  if (earnings?.status !== 'ok') return null;
+  const { trailing } = earnings;
+  const values = PE_FROM.has(period) && view.c ? view.c.map((price, i) => peAt(trailing, view.t[i], price)) : null;
+  const now = earningsAt(trailing, Date.now());
+  return {
+    label: 'P/E',
+    values,
+    now: peAt(trailing, Date.now(), open.data.quote.last),
+    dp: 1,
+    note: !now ? 'no recent report' : now.eps <= 0 ? 'none: a loss over 12 months' : values ? 'ratio scale, both from the same start' : 'line from 6M up',
+  };
+}
+
+// What the P/E line is, or why there is none.
+function peNote(data) {
+  const { earnings, filings } = data;
+  if (earnings.status === 'ok') {
+    const latest = earnings.trailing.at(-1);
+    return el('p', { class: 'd-note' },
+      `P/E: the price over the twelve months' diluted earnings per share as filed with the SEC (${figure(latest.eps, 2)} ${earnings.currency} for the twelve months to ${longDate(latest.end)}), `
+      + 'each report from the day it was filed, and earlier ones in today\'s shares across stock splits. '
+      + 'Both lines start together on a ratio scale, so where they part, earnings have changed; each line\'s high and low are marked on its side. '
+      + 'There is no P/E while the twelve months show a loss. The P/E among the key figures is the quote feed\'s.');
+  }
+  const why = {
+    currency: () => `${data.name} reports its earnings in ${earnings.reported}, and this listing is priced in ${earnings.quoted}.`,
+    shares: () => `the company files its earnings per ordinary share, and this listing's shares look to stand for a different number of them (the filings give a P/E of ${fmt(earnings.pe, 1)}, the quote feed ${fmt(earnings.feeds, 1)}).`,
+    error: () => `${earnings.message}. It is tried again when the panel is next opened.`,
+    none: () => (filings.status === 'ok' ? 'the company\'s filings with the SEC carry no earnings per share for recent years.' : null),
+  }[earnings.status]?.();
+  return why && el('p', { class: 'd-note' }, `No P/E line: ${why}`);
 }
 
 function stat(label, value) {
@@ -231,8 +299,8 @@ function render() {
   if (!open) return;
   const { row, index, data, error } = open;
   const q = data?.quote;
-  $('.d-sub', dialog).textContent = [row.ticker, q?.stats?.exchange, row.sector, `${fmt(row.weight, 2)}% of ${index.name}`].filter(Boolean).join(' · ');
-  $('.dq-last', dialog).textContent = fmt(q?.last ?? row.last, row.dp);
+  $('.d-sub', dialog).textContent = [row.ticker ?? row.symbol, q?.stats?.exchange ?? row.exchange, row.sector, index && `${fmt(row.weight, 2)}% of ${index.name}`].filter(Boolean).join(' · ');
+  $('.dq-last', dialog).textContent = fmt(q?.last ?? row.last, q?.dp ?? row.dp);
   const move = changeText(q?.changePct ?? null, false);
   const moved = $('.dq-chg', dialog);
   moved.textContent = q ? `${signed(q.change, q.dp).text} (${move.text})` : '';
@@ -243,11 +311,13 @@ function render() {
   const body = $('#c-body');
   if (error) return body.replaceChildren(el('p', { class: 'd-note warn', text: `Could not load this company (${error}).` }));
   if (!data) return body.replaceChildren(el('p', { class: 'd-note', text: 'Loading the company\'s figures…' }));
+  // A fund, an index or a future found with the search box has no statements to speak of.
+  const company = !row.type || ['STOCK', 'CSRT'].includes(row.type) || data.filings.status === 'ok';
   return body.replaceChildren(
+    ...[peNote(data)].filter(Boolean),
     el('h3', { text: 'Key figures' }),
     el('dl', { class: 'd-stats' }, ...keyFigures(q)),
     el('p', { class: 'd-note', text: 'From the quote feed.' }),
-    el('h3', { text: 'Financial statements' }),
-    ...statements(data.filings),
+    ...(company ? [el('h3', { text: 'Financial statements' }), ...statements(data.filings)] : []),
   );
 }

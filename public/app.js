@@ -1,6 +1,7 @@
 import { CATALOG } from './catalog.js';
 import { hideTip, lineSvg, plotLine, showTip } from './chart.js';
 import { initCompany } from './company.js';
+import { initSearch } from './search.js';
 import { initDetail, openDetail, renderDetail } from './detail.js';
 import { changeOver, changeText, lineView, MODES, PERIOD_NAME, PERIOD_SHORT, PERIODS, setChange } from './periods.js';
 import { $, el, fmt, getJson, postJson, signed, store, timeLabel } from './util.js';
@@ -817,6 +818,7 @@ async function init() {
   initControls();
   initDetail(detailContext);
   initCompany();
+  initSearch();
   try {
     state.config = await getJson('/api/config');
   } catch (err) {
