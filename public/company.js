@@ -189,16 +189,23 @@ function peLine(view, period) {
   };
 }
 
-// What the P/E line is, or why there is none.
-function peNote(data) {
+// What the P/E line is, or why there is none. `valued` says whether the
+// valuation measures are shown.
+function peNote(data, valued) {
   const { earnings, filings } = data;
   if (earnings.status === 'ok') {
     const latest = earnings.trailing.at(-1);
+    // The valuation measures take today's P/E from this line, unless they are
+    // only the feed's: the latest filings are too old (Toyota's), or the feed
+    // gave no market cap to carry back.
+    const elsewhere = data.valuation.source === 'filings' ? 'Today\'s is the trailing P/E among the valuation measures.'
+      : valued ? 'The trailing P/E among the valuation measures is the quote feed\'s.'
+        : 'The P/E among the key figures is the quote feed\'s.';
     return el('p', { class: 'd-note' },
       `P/E: the price over the twelve months' diluted earnings per share as filed with the SEC (${figure(latest.eps, 2)} ${earnings.currency} for the twelve months to ${longDate(latest.end)}), `
       + 'each report from the day it was filed, and earlier ones in today\'s shares across stock splits. '
       + 'Both lines start together on a ratio scale, so where they part, earnings have changed. Hover the chart for the P/E on any day. '
-      + 'There is no P/E while the twelve months show a loss. Today\'s is the trailing P/E among the valuation measures.');
+      + `There is no P/E while the twelve months show a loss. ${elsewhere}`);
   }
   const why = {
     currency: () => `${data.name} reports its earnings in ${earnings.reported}, and this listing is priced in ${earnings.quoted}.`,
@@ -272,14 +279,16 @@ function valuationNote(data) {
       : 'without recent statements filed with the SEC';
     return el('p', { class: 'd-note', text: `From the quote feed, for today only: ${why}, there are no earlier periods to value it at. ${peg}` });
   }
-  const { rows } = valuation;
+  // A bank does not tag its debt as such; the odd company its cash.
+  const lacks = valuation.lacks ?? [];
+  const untagged = lacks.length === 2 ? 'its debt or its cash' : `its ${lacks[0]}`;
   return el('p', { class: 'd-note' },
     'Current is today\'s price with the latest figures filed with the SEC; each earlier column is the close on the period\'s last day with the figures to it. '
     + 'Market cap is the quote feed\'s, carried back by the price and the number of shares the company filed. '
     + 'Enterprise value adds debt and takes off cash and short-term investments. '
     + 'Sales, revenue and EBITDA (operating income with depreciation and amortization added back) are the twelve months\' (TTM), book value is shareholders\' equity on the day. '
     + (earnings.status === 'ok' ? '' : 'The trailing P/E today is the quote feed\'s, and there is none earlier. ')
-    + (rows.enterpriseValue[0] == null && rows.marketCap[0] != null ? 'The company does not tag its debt in its filings (as is usual for a bank), so there is no enterprise value. ' : '')
+    + (lacks.length ? `The company does not tag ${untagged} in its filings${lacks.includes('debt') ? ' (as is usual for a bank)' : ''}, so there is no enterprise value. ` : '')
     + `The forward P/E is the quote feed's, from analysts' estimates. ${peg}`);
 }
 
@@ -377,7 +386,7 @@ function render() {
   const company = !row.type || ['STOCK', 'CSRT'].includes(row.type) || data.filings.status === 'ok';
   const valued = company && Object.values(data.valuation.rows).some((values) => values.some((value) => value != null));
   return body.replaceChildren(
-    ...[peNote(data)].filter(Boolean),
+    ...[peNote(data, valued)].filter(Boolean),
     ...(valued ? [el('h3', { text: 'Valuation measures' }), el('div', { class: 'c-scroll' }, valuationTable(data.valuation)), valuationNote(data)] : []),
     el('h3', { text: 'Key figures' }),
     el('dl', { class: 'd-stats' }, ...keyFigures(q, valued)),

@@ -241,8 +241,9 @@ filed with the SEC ([edgar.js](edgar.js), `trailingEarnings`).
   1.5 times the feed's own or below two-thirds of it, which is taken to mean its depositary share stands for
   a different number of ordinary ones (Shell, BP). The panel says which.
 - **The feed's P/E**: today's trailing P/E among the valuation measures is this line's latest figure. The
-  feed's own P/E stands in where there are no filed earnings to use. For Apple, Microsoft and NVIDIA the two
-  agreed within 0.1 when this was written.
+  feed's own P/E stands in where there are no filed earnings to use, and where the measures are the feed's
+  alone (filings over 550 days old, as Toyota's are now); the panel's note says which. For Apple, Microsoft
+  and NVIDIA the two agreed within 0.1 when this was written.
 - The earnings come from the cached statements in `.cache/edgar`; copies made before this was added are
   fetched again once. The split factors are kept six hours.
 
@@ -262,11 +263,13 @@ day with the figures to that day.
   (Berkshire Hathaway), the price alone carries it back.
 - **Enterprise value**: market cap plus debt (long-term debt with the part due within a year, and short-term
   borrowing) less cash and short-term investments, from the balance sheet on the day. Banks and some
-  conglomerates do not tag their debt as such (JPMorgan, Berkshire Hathaway), and have no enterprise value.
+  conglomerates do not tag their debt as such (JPMorgan, Berkshire Hathaway), and have no enterprise value;
+  the panel's note says whether the debt or the cash is missing.
 - **Ratios**: trailing P/E is the price over the twelve months' diluted earnings per share, as on the P/E line;
   P/S and EV/revenue use the twelve months' revenue; P/B uses shareholders' equity on the day; EV/EBITDA uses
   operating income with depreciation and amortization added back over twelve months (or profit before tax
-  with interest added back too, for a company that files no operating income). Nothing is divided by a loss
+  with interest added back too, for a company that files no operating income: Exxon, Chevron, Shell,
+  ConocoPhillips; none where it files no interest either, rather than one too low). Nothing is divided by a loss
   or by negative equity.
 - **Forward P/E and PEG**: from CNBC, for today only. The PEG ratio is CNBC's P/E over the growth in earnings
   per share that analysts' estimates expect for the next year; Yahoo's uses five years' expected growth, which

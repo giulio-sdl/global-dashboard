@@ -101,17 +101,21 @@ export function valuationMeasures({ quote, basis = null, trailing = null, closes
     const marketCap = price == null ? null : feed.marketCap * (price / quote.last) * sharesThen(period);
     return measures(price, marketCap, period, trailing?.find((entry) => entry.end === period.end)?.eps ?? null);
   });
-  return table(quote, 'filings', basis.kind, [null, ...basis.periods.map((period) => period.end)], [today, ...then]);
+  // What today's enterprise value is missing where it is not known: the debt, the cash or both.
+  const lacks = ['debt', 'cash'].filter((part) => latest[part] == null);
+  return table(quote, 'filings', basis.kind, [null, ...basis.periods.map((period) => period.end)], [today, ...then], lacks);
 }
 
 // Laid out by measure, a row of figures each: today's first (its date null),
-// then each period's, newest first. `kind` says whether those are quarters or years.
-function table(quote, source, kind, dates, columns) {
+// then each period's, newest first. `kind` says whether those are quarters or
+// years, and `lacks` what the filings do not give for today's enterprise value.
+function table(quote, source, kind, dates, columns, lacks = []) {
   return {
     source,
     kind,
     currency: quote.currency,
     dates,
     rows: Object.fromEntries(MEASURES.map((name) => [name, columns.map((column) => column[name] ?? null)])),
+    lacks,
   };
 }
