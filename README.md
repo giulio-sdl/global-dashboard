@@ -200,8 +200,8 @@ filed with the SEC ([edgar.js](edgar.js), `trailingEarnings`).
   Chart prices are in today's shares too. NVIDIA, with splits in 2021 and 2024, runs without a break.
 - **One scale**: the price and the P/E start together and share a ratio scale, where the same change in percent
   is the same height. Where the lines part, earnings have changed: a price line pulling above the P/E line is
-  earnings growing. Each line's high and low are marked on its side, the price's on the left. The legend's
-  P/E button hides the line.
+  earnings growing. The price's high and low are marked on the left; the P/E's one figure is the latest, in
+  the legend, and hovering gives it for any day. The legend's P/E button hides the line.
 - **Not drawn**: on one day to three months, where earnings rarely change and the line would retrace the
   price; while the twelve months show a loss; when the earnings are in another currency than the listing
   (Apple in Zurich, TSMC in New York, which reports in Taiwan dollars); when the filings carry no earnings

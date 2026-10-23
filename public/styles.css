@@ -704,13 +704,9 @@ dialog.detail h4 { color: var(--ink-2); font-size: 13px; letter-spacing: 0.07em;
 .d-hi, .d-lo { position: absolute; left: 0; padding: 0 4px 0 0; background: var(--surface); color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; pointer-events: none; }
 .d-hi { top: 2px; }
 .d-lo { bottom: 2px; }
-/* The P/E line; its high and low are marked on the right. */
+/* The P/E line. */
 .spark .line2 { fill: none; stroke: var(--pe); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
 .spark .probe2 { fill: var(--pe); stroke: var(--surface); stroke-width: 2; }
-.d-hi2, .d-lo2 { position: absolute; right: 0; padding: 0 0 0 4px; background: color-mix(in srgb, var(--surface) 75%, transparent); color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; pointer-events: none; }
-.d-hi2:not(:empty)::before, .d-lo2:not(:empty)::before { content: "P/E "; }
-.d-hi2 { top: 2px; }
-.d-lo2 { bottom: 2px; }
 .d-axis { display: flex; justify-content: space-between; margin-top: 3px; color: var(--muted); font-size: 11px; }
 
 dialog.detail h3 { margin: 24px 0 2px; font-size: 18px; }
