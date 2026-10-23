@@ -237,10 +237,12 @@ day with the figures to that day.
   in the share count is used, which keeps companies with several share classes right. Where no count is filed
   (Berkshire Hathaway), the price alone carries it back.
 - **Enterprise value**: market cap plus debt (long-term debt with the part due within a year, and short-term
-  borrowing) less cash and short-term investments, from the balance sheet on the day. Banks and some
-  conglomerates do not tag their debt as such (JPMorgan, Goldman Sachs, Berkshire Hathaway), and Caterpillar
-  tags its quarters' debt only by business, so these have no enterprise value, or Caterpillar only at its
-  year ends; the panel's note says whether the debt or the cash is missing.
+  borrowing) less cash and short-term investments, from the balance sheet on the day. Where a company tags
+  its long-term debt with the part due within a year as one figure, that is used rather than two parts
+  (Chevron, Verizon and ConocoPhillips, whose short-term lines already hold that part). Some banks and
+  conglomerates do not tag their debt as such (Goldman Sachs, Berkshire Hathaway), and Caterpillar tags its
+  quarters' debt only by business, so these have no enterprise value, or Caterpillar only at its year ends;
+  the panel's note says whether the debt or the cash is missing. Other banks do (JPMorgan, Bank of America).
 - **Ratios**: trailing P/E is the price over the twelve months' diluted earnings per share, as on the P/E line;
   P/S and EV/revenue use the twelve months' revenue; P/B uses shareholders' equity on the day; EV/EBITDA uses
   operating income with depreciation and amortization added back over twelve months (or profit before tax
