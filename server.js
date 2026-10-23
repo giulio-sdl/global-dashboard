@@ -287,12 +287,19 @@ function companyStats(raw) {
 function normalizeQuote(raw, withStats = false) {
   const last = num(raw.last);
   if (raw.code !== 0 || last == null) return null;
+  const dp = decimals(raw.last, last);
+  // Pre-market or after-hours trading. Its change is measured from the price
+  // the regular session left off at, so while that is still the price quoted
+  // it is current; once the regular session trades again it is not (the feed
+  // goes on giving the morning's pre-market trade through the day).
   const ext = raw.ExtendedMktQuote;
   const extLast = ext ? num(ext.last) : null;
+  const extended = extLast == null ? null : change(extLast, ext.change, ext.change_pct);
+  const current = extended && Math.abs(extended.prevClose - last) <= 0.5 * 10 ** -places(ext.last) + 0.5 * 10 ** -dp + 1e-9;
   return {
     last,
     ...change(last, raw.change, raw.change_pct),
-    dp: decimals(raw.last, last),
+    dp,
     high: positive(raw.high),
     low: positive(raw.low),
     yrHigh: positive(raw.yrhiprice),
@@ -305,11 +312,12 @@ function normalizeQuote(raw, withStats = false) {
     contract: /\(([A-Z][a-z]{2})'(\d{2})\)/.exec(raw.name || '')?.slice(1, 3).join(" '") || null,
     fullName: raw.name || null,
     stats: withStats ? companyStats(raw) : undefined,
-    ext: extLast == null ? null : {
+    ext: !current ? null : {
       type: ext.type || null,
       last: extLast,
-      ...change(extLast, ext.change, ext.change_pct),
+      ...extended,
       time: ext.last_timedate || null,
+      volume: amount(ext.volume),
     },
   };
 }

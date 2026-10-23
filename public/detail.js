@@ -5,7 +5,7 @@
 import { openCompany } from './company.js';
 import { chartFigure } from './figure.js';
 import { changeText, lineView, PERIOD_NAME, PERIOD_SHORT, PERIODS } from './periods.js';
-import { $, el, fmt, getJson, signed, timeLabel } from './util.js';
+import { $, el, fmt, getJson, renderExtended, signed, timeLabel } from './util.js';
 
 const REFRESH_MS = 60_000;
 const LINES_TTL_MS = 180_000;
@@ -181,6 +181,7 @@ export function renderDetail() {
   move.className = `dq-chg ${today.dir}`;
   // A market that never closes has no session: its figures are of the last 24 hours.
   $('.dq-time', dialog).textContent = [q.rolling ? 'last 24 hours' : 'latest session', timeLabel(q.time)].filter(Boolean).join(' · ');
+  renderExtended($('.d-ext', dialog), q);
 
   const range = (low, high) => (low != null && high != null ? `${price(low)} – ${price(high)}` : '—');
   const stats = [

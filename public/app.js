@@ -115,8 +115,8 @@ function renderPills() {
 
 // Every table shows four changes side by side: those of the selected view.
 // Their headers are filled in by showMode. A yield moves in basis points
-// rather than percent, and country tables trade the 52-week range for the
-// move since the close.
+// rather than percent, and country tables give the 52-week range's column to
+// the move since the close, and show the range under the index's level.
 const CHANGE_COLUMNS = [0, 1, 2, 3].map((slot) => ['', slot ? 'c-pct c-more' : 'c-pct', slot]);
 const YIELD_DP = 3;
 const columnsFor = (group) => [
@@ -125,6 +125,15 @@ const columnsFor = (group) => [
   ['', 'c-spark'],
   group.markets ? ['Since close', 'c-ext'] : ['52-wk range', 'c-range'],
 ];
+
+// The 52-week range as a rev bar; hovering or focusing it gives the figures.
+function buildRange() {
+  const range = el('span', { class: 'range', tabindex: '0', role: 'img' }, el('i'));
+  range.hidden = true;
+  for (const type of ['pointerenter', 'focus']) range.addEventListener(type, onRangeShow);
+  for (const type of ['pointerleave', 'blur']) range.addEventListener(type, hideTip);
+  return range;
+}
 
 function buildRow(item, sinceClose, group) {
   const tr = el('tr', { 'data-sym': item.symbol });
@@ -141,19 +150,13 @@ function buildRow(item, sinceClose, group) {
       el('span', { class: 'sub multi' }),
       ...(group.key ? [buildRowEdit(item, group)] : []),
     ),
-    el('td', { class: 'c-last last', text: '—' }),
+    el('td', { class: 'c-last last' }, el('span', { class: 'lv', text: '—' }), ...(sinceClose ? [buildRange()] : [])),
     ...CHANGE_COLUMNS.map(([, cls]) => el('td', { class: cls }, el('span', { class: 'chip na', text: '—' }))),
     el('td', { class: 'c-spark' }, lineSvg()),
+    sinceClose
+      ? el('td', { class: 'c-ext' }, el('span', { class: 'nm xp', text: '—' }), el('span', { class: 'sub xc' }))
+      : el('td', { class: 'c-range' }, buildRange()),
   );
-  if (sinceClose) {
-    tr.append(el('td', { class: 'c-ext' }, el('span', { class: 'nm xp', text: '—' }), el('span', { class: 'sub xc' })));
-  } else {
-    const range = el('span', { class: 'range', tabindex: '0', role: 'img' }, el('i'));
-    range.hidden = true;
-    for (const type of ['pointerenter', 'focus']) range.addEventListener(type, onRangeShow);
-    for (const type of ['pointerleave', 'blur']) range.addEventListener(type, hideTip);
-    tr.append(el('td', { class: 'c-range' }, range));
-  }
   return tr;
 }
 
@@ -457,7 +460,7 @@ function renderRow(tr) {
   $('.sub', cells[0]).textContent = [item.note, q.contract, item.unit, timeLabel(q.time), backup].filter(Boolean).join(' · ');
   cells[0].title = q.fullName || '';
   flashOnChange(cells[1], q.last);
-  cells[1].textContent = item.yield ? `${fmt(q.last, YIELD_DP)}%` : fmt(q.last, q.dp);
+  $('.lv', cells[1]).textContent = item.yield ? `${fmt(q.last, YIELD_DP)}%` : fmt(q.last, q.dp);
   const { periods } = MODES[state.mode];
   const moves = changesFor(item, q, periods);
   // The yield table's header carries the "bp", so its figures go without.
@@ -482,18 +485,20 @@ function renderRow(tr) {
       ? `Since the close, read from ${after.source}. Implies about ${fmt(after.level, q.dp)}.`
       : 'Shown once the exchange has closed and its future or ETF has traded since';
     $('.oh', cells[0]).replaceChildren(...(after ? ['Since close ', el('b', { class: dir, text: text }), ` · ${after.tag}`] : []));
-  } else {
-    const range = $('.range', cells[7]);
-    const valid = q.yrLow != null && q.yrHigh != null && q.yrHigh > q.yrLow;
-    range.hidden = !valid;
-    if (valid) {
-      const pos = Math.min(1, Math.max(0, (q.last - q.yrLow) / (q.yrHigh - q.yrLow)));
-      $('i', range).style.left = `calc(5px + ${pos.toFixed(4)} * (100% - 10px))`;
-      range.dataset.tip = `52-wk low <b>${fmt(q.yrLow, q.dp)}</b> · high <b>${fmt(q.yrHigh, q.dp)}</b>`;
-      range.setAttribute('aria-label', `52-week range ${fmt(q.yrLow, q.dp)} to ${fmt(q.yrHigh, q.dp)}, now at ${Math.round(pos * 100)}% of the range`);
-    }
   }
+  renderRange($('.range', tr), q);
   renderLine($('.spark', tr), q, SPARK);
+}
+
+// Places today's price on the bar between its 52-week low and high.
+function renderRange(range, q) {
+  const valid = q.yrLow != null && q.yrHigh != null && q.yrHigh > q.yrLow;
+  range.hidden = !valid;
+  if (!valid) return;
+  const pos = Math.min(1, Math.max(0, (q.last - q.yrLow) / (q.yrHigh - q.yrLow)));
+  $('i', range).style.left = `calc(5px + ${pos.toFixed(4)} * (100% - 10px))`;
+  range.dataset.tip = `52-wk low <b>${fmt(q.yrLow, q.dp)}</b> · high <b>${fmt(q.yrHigh, q.dp)}</b>`;
+  range.setAttribute('aria-label', `52-week range ${fmt(q.yrLow, q.dp)} to ${fmt(q.yrHigh, q.dp)}, now at ${Math.round(pos * 100)}% of the range`);
 }
 
 // An instrument's change over each of the given periods.

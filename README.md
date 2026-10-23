@@ -59,6 +59,11 @@ and every visitor's refreshes go to the data feeds through the one server.
   each with its change), its P/E over time, its valuation measures, its key figures and its financial
   statements by year (led by the trailing twelve months) and by quarter (see SEC EDGAR below). It opens on the
   period the index panel was showing. "Back" returns to the index.
+- **Pre-market and after-hours**: a US-listed share or fund opened in either panel shows its latest trade
+  outside the regular session under the session's price, with the yellow light of the exchange status: the
+  price, its change from where the regular session left off, the time and the volume. The evening's after-hours
+  trade stays until the next pre-market one, and that one until the regular session trades again. The feed
+  carries none for other markets, nor for indexes, futures and currencies.
 - **Valuation measures**: the nine Yahoo Finance shows (market cap, enterprise value, trailing and forward P/E,
   PEG, P/S, P/B, EV/revenue, EV/EBITDA), today and at the end of each of the last five quarters (see
   "Valuation measures" below). Both the search box and an index's panel open them.
@@ -100,7 +105,8 @@ and every visitor's refreshes go to the data feeds through the one server.
 - **Commodities**: front-month futures for energy, metals and agriculture.
 - **Currencies**: USD, EUR, CHF, JPY, BRL and CNY. Spot pairs against the dollar, the euro and franc crosses
   the feed quotes directly, and a cross-rate grid for every other combination (derived from the USD pairs).
-- Each row has a trend line (hover for values) and the 52-week range where the feed provides one.
+- Each row has a trend line (hover for values) and the 52-week range (hover for the low and high). An index has
+  its range under its level, as its last column holds the move since the close.
 - **Short term / Long term**: the switch at the top right sets which four changes every table and tile
   shows. Short term is 1 day, 5 days, 1 month and 3 months, with a 3-month trend line; long term is 6 months,
   1 year, 5 years and 10 years, with a 10-year line (or as much history as there is). Yields show the same
