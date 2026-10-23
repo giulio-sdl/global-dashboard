@@ -255,7 +255,9 @@ ends of the last five quarters (years, for a company that reports once a year): 
 day with the figures to that day.
 
 - **Market cap**: today's is CNBC's. Earlier ones are carried back from it by the price and by the number of
-  shares the company filed, both brought into today's shares across splits, so buybacks show. Only the change
+  shares the company filed, both brought into today's shares across splits, so buybacks show. A count is in
+  the shares of the day it was filed, as earnings per share are: after O'Reilly's 15-for-1 split in June 2025,
+  its count for December 2024 was filed again in the new shares, 15 times the first. Only the change
   in the share count is used, which keeps companies with several share classes right. Where no count is filed
   (Berkshire Hathaway), the price alone carries it back.
 - **Enterprise value**: market cap plus debt (long-term debt with the part due within a year, and short-term

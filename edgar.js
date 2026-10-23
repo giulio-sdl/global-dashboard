@@ -114,6 +114,8 @@ const SHARES = {
   cover: { dei: ['EntityCommonStockSharesOutstanding'] },
   average: { 'us-gaap': ['WeightedAverageNumberOfDilutedSharesOutstanding', 'WeightedAverageNumberOfSharesOutstandingBasic'], 'ifrs-full': ['AdjustedWeightedAverageShares', 'WeightedAverageShares'] },
 };
+// The annual and quarterly reports, and their amendments and transition reports.
+const REPORTS = /^(10-K|10-Q|20-F|40-F)/;
 const VALUED = 5; // the periods valued, besides today
 const COVER_DAYS = 120; // a report's cover dates its share count within this many days of the period's end
 
@@ -211,11 +213,15 @@ function overPeriods(filedFacts) {
 }
 
 // A balance-sheet figure on a date; the filing may date it a few days off.
+// `factOn` gives the fact as filed, `onDate` only its value.
+function factOn(list, date) {
+  return list.find((fact) => fact.end === date)
+    ?? list.find((fact) => Math.abs(Date.parse(fact.end) - Date.parse(date)) <= 5 * DAY_MS)
+    ?? null;
+}
+
 function onDate(list, date) {
-  const exact = list.find((fact) => fact.end === date);
-  if (exact) return exact.val;
-  const near = list.find((fact) => Math.abs(Date.parse(fact.end) - Date.parse(date)) <= 5 * DAY_MS);
-  return near ? near.val : null;
+  return factOn(list, date)?.val ?? null;
 }
 
 // A figure over the twelve months to a period's end: the fiscal year that
@@ -229,23 +235,25 @@ function twelveMonths({ annual, quarterly }, end) {
 }
 
 // The number of shares on a period's end, from a list filed in one of the
-// ways SHARES names.
+// ways SHARES names: the fact as filed, since the day it was filed says
+// which shares it counts (see valuation.js).
 function sharesOn(kind, list, end) {
   const t = Date.parse(end);
-  if (kind === 'date') return onDate(list, end);
+  if (kind === 'date') return factOn(list, end);
   if (kind === 'cover') {
     const covers = list.filter((fact) => Date.parse(fact.end) > t && Date.parse(fact.end) <= t + COVER_DAYS * DAY_MS);
-    return covers.length ? covers.reduce((a, b) => (b.end < a.end ? b : a)).val : null;
+    return covers.length ? covers.reduce((a, b) => (b.end < a.end ? b : a)) : null;
   }
   // The average over the quarter to that day, else over the year: a fourth
   // quarter's is filed only as the year's.
   const over = list.filter((fact) => fact.start && Math.abs(Date.parse(fact.end) - t) <= 5 * DAY_MS);
-  return (over.find((fact) => isQuarter(days(fact.start, fact.end))) ?? over.find((fact) => isYear(days(fact.start, fact.end))))?.val ?? null;
+  return over.find((fact) => isQuarter(days(fact.start, fact.end))) ?? over.find((fact) => isYear(days(fact.start, fact.end))) ?? null;
 }
 
 // What valuing the company at the end of each period in `ends` takes (see
 // valuation.js): the twelve months' revenue and EBITDA to then, its equity,
-// debt and cash on the day, and its number of shares.
+// debt and cash on the day, and its number of shares with the day that
+// count was filed.
 function valuationBasis(company, { standard, currency }, flows, balances, ends) {
   const facts = company.facts[standard];
   const listed = (groups) => Object.fromEntries(Object.entries(groups).map(([part, tags]) => [part, filed(facts, tags, currency)]));
@@ -290,7 +298,8 @@ function valuationBasis(company, { standard, currency }, flows, balances, ends) 
     equity: onDate(balances.equity, end),
     debt: debtOn(end),
     cash: cashOn(end),
-    shares: shares?.[i] ?? null,
+    shares: shares?.[i]?.val ?? null,
+    sharesFiled: shares?.[i]?.filed ?? null,
   }));
 }
 
@@ -346,8 +355,12 @@ export function distill(company) {
   const valued = (current ? quarterly : annual).periods.slice(0, VALUED);
 
   // The filing the newest figures come from. It repeats last year's for
-  // comparison, so within it the latest period is the one it reports.
-  const newest = filed(facts, OVER_A_PERIOD.netIncome[basis.standard], basis.currency)
+  // comparison, so within it the latest period is the one it reports. A proxy
+  // statement or an 8-K may repeat a year's profit after the report itself
+  // (Microsoft's does); those are not reports, unless there is nothing else.
+  const profits = byTag(facts, OVER_A_PERIOD.netIncome[basis.standard], basis.currency).flat();
+  const reports = profits.filter((fact) => REPORTS.test(fact.form ?? ''));
+  const newest = (reports.length ? reports : profits)
     .reduce((a, b) => (!a || b.filed > a.filed || (b.filed === a.filed && b.end > a.end) ? b : a), null);
 
   return {
@@ -507,7 +520,8 @@ export function createEdgar({ contact, cacheDir }) {
   // quarterly reports). They are fetched again when the copy on disk is a
   // quarter old, or weekly once the next report is overdue.
   function due(kept) {
-    if (!kept.statements.eps || !kept.statements.valuation) return true; // kept before earnings per share, or valuation figures, were
+    // Kept before earnings per share, or valuation figures with the day each share count was filed, were.
+    if (!kept.statements.eps || !kept.statements.valuation?.periods.every((period) => 'sharesFiled' in period)) return true;
     const age = Date.now() - kept.at;
     if (age > QUARTER_MS) return true;
     const between = kept.statements.quarterly.periods.length ? 100 : 480;
