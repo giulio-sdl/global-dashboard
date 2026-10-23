@@ -35,8 +35,9 @@ const ratio = (value, over) => (value != null && over > 0 ? value / over : null)
 const positive = (value) => (value > 0 ? value : null);
 
 // `quote` is the share's, with the feed's key figures as `stats`. `basis` is
-// the filings' figures at the period ends, newest first, and `trailing` the
-// twelve months' earnings per share as trailingEarnings gives them; both must
+// the filings' figures at the period ends, newest first, each share count with
+// `sharesFiled`, the day it was filed; `trailing` is the twelve months'
+// earnings per share as trailingEarnings gives them. Both must
 // be in the price's currency, and `trailing` in the price's shares. `closes`
 // are daily [time, close] bars in today's shares, oldest first, and
 // `splitFactor(date)` is how many of today's shares one share was on a date.
@@ -82,10 +83,11 @@ export function valuationMeasures({ quote, basis = null, trailing = null, closes
     return close;
   };
   // The shares on a period's end over those on the latest one, both counted
-  // in today's shares across splits.
-  const sharesThen = (period) => (period.shares != null && latest.shares && splitFactor
-    ? (period.shares * splitFactor(period.end)) / (latest.shares * splitFactor(latest.end))
-    : 1);
+  // in today's shares across splits. A count is in the shares of the day it
+  // was filed: the reports after a split restate earlier counts in the new
+  // shares, as they do earnings per share (see trailingEarnings in edgar.js).
+  const inToday = (period) => period.shares * splitFactor(period.sharesFiled ?? period.end);
+  const sharesThen = (period) => (period.shares != null && latest.shares && splitFactor ? inToday(period) / inToday(latest) : 1);
 
   const today = {
     ...measures(quote.last, feed.marketCap, latest, trailing?.at(-1)?.eps ?? null),
