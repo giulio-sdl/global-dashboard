@@ -28,6 +28,9 @@ const REQUEST_GAP_MS = 150; // well inside the SEC's ten a second
 const YEARS_SHOWN = 5;
 const QUARTERS_SHOWN = 6;
 const EPS_YEARS = 12; // enough for the trailing twelve months at the start of a ten-year chart
+// Raised whenever distill reads or lays out the filings differently, so that
+// statements kept on disk from before are fetched again once.
+const LAYOUT = 1;
 
 // The tags a figure may be filed under, per accounting standard. Companies
 // differ, and change tags over the years; the tag with the newest figure
@@ -87,11 +90,12 @@ const PRETAX = {
 const INTEREST = { 'us-gaap': ['InterestExpense', 'InterestExpenseNonoperating', 'InterestAndDebtExpense', 'InterestExpenseDebt'], 'ifrs-full': ['FinanceCosts', 'InterestExpense'] };
 // All debt: long-term debt including the part due within a year (else its two
 // parts added up), and short-term borrowing besides. IFRS has one total for all of it.
+// Chevron's quarters tag long-term debt only as the total with leases; Oracle's tag it as notes.
 const DEBT = {
   'us-gaap': {
-    total: ['LongTermDebt'],
-    noncurrent: ['LongTermDebtNoncurrent', 'LongTermDebtAndCapitalLeaseObligations'],
-    current: ['LongTermDebtCurrent', 'LongTermDebtAndCapitalLeaseObligationsCurrent'],
+    total: ['LongTermDebt', 'LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities'],
+    noncurrent: ['LongTermDebtNoncurrent', 'LongTermDebtAndCapitalLeaseObligations', 'LongTermNotesAndLoans'],
+    current: ['LongTermDebtCurrent', 'LongTermDebtAndCapitalLeaseObligationsCurrent', 'NotesPayableCurrent'],
     short: ['ShortTermBorrowings', 'CommercialPaper'],
   },
   'ifrs-full': {
@@ -523,8 +527,7 @@ export function createEdgar({ contact, cacheDir }) {
   // quarterly reports). They are fetched again when the copy on disk is a
   // quarter old, or weekly once the next report is overdue.
   function due(kept) {
-    // Kept before earnings per share, or valuation figures with the day each share count was filed, were.
-    if (!kept.statements.eps || !kept.statements.valuation?.periods.every((period) => 'sharesFiled' in period)) return true;
+    if (kept.layout !== LAYOUT) return true;
     const age = Date.now() - kept.at;
     if (age > QUARTER_MS) return true;
     const between = kept.statements.quarterly.periods.length ? 100 : 480;
@@ -537,7 +540,7 @@ export function createEdgar({ contact, cacheDir }) {
     const kept = await read(name);
     if (kept && !due(kept)) return kept;
     try {
-      const fresh = { at: Date.now(), statements: distill(await request(factsUrl(cik))) };
+      const fresh = { at: Date.now(), layout: LAYOUT, statements: distill(await request(factsUrl(cik))) };
       if (!fresh.statements) return kept ?? fresh;
       await write(name, fresh);
       return fresh;
