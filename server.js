@@ -10,6 +10,7 @@ import { loadHoldings } from './holdings.js';
 import { MARKETS, OVERVIEW, SECTIONS } from './instruments.js';
 import { betweenDailyCloses, HOUR_BAR_MS, MINUTE_BAR_MS, momentBefore, priceAt, rangeSince } from './rolling.js';
 import { sinceClose } from './sinceclose.js';
+import { valuationMeasures } from './valuation.js';
 
 const PORT = Number(process.env.PORT) || 5177;
 // Only this computer can reach the server unless HOST says otherwise; a
@@ -176,6 +177,7 @@ function amount(text) {
 // share's summary page. Indexes, futures and currencies have none.
 function companyStats(raw) {
   if (raw.mktcapView == null && raw.pe == null && raw.sharesout == null) return null;
+  const millions = amount(raw.enterpriseValue);
   return {
     exchange: raw.exchange || null,
     open: amount(raw.open),
@@ -188,6 +190,7 @@ function companyStats(raw) {
     eps: amount(raw.eps),
     forwardEps: amount(raw.feps),
     priceToSales: amount(raw.psales),
+    enterpriseValue: millions == null ? null : millions * 1e6,
     dividend: amount(raw.dividend),
     dividendYield: amount(raw.dividendyield),
     beta: amount(raw.beta),
@@ -881,10 +884,36 @@ const factorOn = (steps) => (date) => {
   return factor;
 };
 
-// A company's statements for its panel, and the trailing earnings per share
-// its P/E line is drawn from. The filings behind those stay here.
-async function withEarnings(symbol, quote, { eps, ...filings }) {
-  return { filings, earnings: await earningsOf(symbol, quote, filings, eps) };
+// A company's statements for its panel, the trailing earnings per share its
+// P/E line is drawn from, and its valuation measures. The filings behind
+// those stay here.
+async function withEarnings(symbol, quote, { eps, valuation: basis, ...filings }) {
+  const earnings = earningsOf(symbol, quote, filings, eps);
+  const valuation = valuationOf(symbol, quote, filings, basis, earnings);
+  return { filings, earnings: await earnings, valuation: await valuation };
+}
+
+// Daily closes back to the earliest period valued, for the price at each
+// period's end.
+const closesSince = keyed(HISTORY.day.ttlMs, async (symbol, since) => {
+  const bars = await loadBarsBetween(symbol, '1D', since, Date.now() + DAY_MS);
+  // An empty answer is the feed struggling (see the history loaders).
+  if (!bars.length) throw new Error('no price history just now');
+  return bars;
+});
+
+// Yahoo's valuation measures, today's and at the end of each recent period
+// (see valuation.js). Figures filed in another currency than the price are
+// not set against it: then there are only the quote feed's own, for today.
+async function valuationOf(symbol, quote, filings, basis, earnings) {
+  if (filings.status !== 'ok' || !basis?.periods.length || (quote.currency && quote.currency !== filings.currency)) return valuationMeasures({ quote });
+  const since = Date.parse(basis.periods.at(-1).end) - 10 * DAY_MS;
+  const [closes, steps, { status, trailing }] = await Promise.all([
+    closesSince(`${symbol}|${since}`, symbol, since).then((loaded) => loaded.value, () => null),
+    splitsOf(symbol, symbol).then((loaded) => loaded.value, () => null),
+    earnings.catch(() => ({})),
+  ]);
+  return valuationMeasures({ quote, basis, trailing: status === 'ok' ? trailing : null, closes, splitFactor: steps && factorOn(steps) });
 }
 
 // The twelve months' earnings per share as each report made them known, in
