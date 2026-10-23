@@ -55,8 +55,16 @@ and every visitor's refreshes go to the data feeds through the one server.
   constituents over the period selected there: which ones lifted or dragged the index most, the same by sector,
   and a sortable table of every constituent with its weight.
 - **Company panel**: click a company's name in an index's panel for its price chart (the same eight periods,
-  each with its change), its key figures and its financial statements by year and by quarter (see SEC EDGAR
-  below). It opens on the period the index panel was showing. "Back" returns to the index.
+  each with its change), its P/E over time, its key figures and its financial statements by year and by
+  quarter (see SEC EDGAR below). It opens on the period the index panel was showing. "Back" returns to the index.
+- **Search**: the box in the header finds any share, fund, index or future by its symbol or name, in any market
+  the quote feed covers, and opens it in the company panel on five years. Arrow keys and Enter pick a match;
+  Enter with none highlighted opens the first, or the text as a symbol when nothing matches. "/" anywhere on
+  the page puts the cursor in the box. A company listed in several countries is offered once, in its home
+  market; type another listing's symbol (`AAPL-CH`) to get that one. Funds, indexes and futures have their
+  chart and key figures, without statements.
+- **P/E line**: on six months and longer, a company's chart carries its P/E: each price over the twelve months'
+  diluted earnings per share known on that day, from its SEC filings (see "P/E over time" below).
 - **How constituent contributions are worked out**: a name's contribution is its weight at the start of the
   period times its price change. Only today's weights are known, so the starting weight is worked back from
   them, and the contributions add up to the move of the whole basket. Beyond one day each constituent needs
@@ -129,7 +137,7 @@ The preferred order is Yahoo Finance, then CNBC, FRED and SEC EDGAR. In practice
 | Source | Used for | Notes |
 |---|---|---|
 | Yahoo Finance | Nothing | Its data service turns programs away (HTTP 429) while answering a browser on the same computer, and it does not let another site's page read it. Using it would mean disguising the server as a browser, which this project does not do. |
-| CNBC quote feed | Every live price, every chart and every change over a period; each company's key figures | The working first source. No key needed. |
+| CNBC quote feed | Every live price, every chart and every change over a period; each company's key figures; the search box's matches | The working first source. No key needed. |
 | FRED | Treasury yield history, when CNBC has none | Official daily yields from the St. Louis Fed. See [fred.js](fred.js). |
 | SEC EDGAR | Company financial statements | As filed by the company. See [edgar.js](edgar.js). |
 | iShares | Index constituents and weights | Daily holdings files. See [holdings.js](holdings.js). |
@@ -175,6 +183,35 @@ fiscal years and six quarters, as the company filed them.
   address nothing is requested and the panel shows key figures only.
 - **Known gap**: a company that has reorganised under a new registration (a new holding company, say) starts
   again with only the reports filed since.
+
+### P/E over time
+
+The P/E line is worked out here, from two things the panel already has: prices and the earnings per share
+filed with the SEC ([edgar.js](edgar.js), `trailingEarnings`).
+
+- **Twelve months' earnings**: a fiscal year's own figure where the twelve months are one, otherwise the last
+  four quarters added up. Each figure counts from the day its report was filed, not from the end of the
+  quarter, so the line only knows what the market knew. A company that reports once a year (most foreign
+  filers) has a new figure once a year.
+- **Stock splits**: a filing counts in the shares of its day, and the filings after a split restate earlier
+  figures in the new shares, so every figure is first brought into today's shares. The factor comes from the
+  quote feed, which gives prices both as they traded and adjusted for splits (only for splits, not for
+  dividends): their ratio in the week a report was filed is how many of today's shares one share was then.
+  Chart prices are in today's shares too. NVIDIA, with splits in 2021 and 2024, runs without a break.
+- **One scale**: the price and the P/E start together and share a ratio scale, where the same change in percent
+  is the same height. Where the lines part, earnings have changed: a price line pulling above the P/E line is
+  earnings growing. Each line's high and low are marked on its side, the price's on the left. The legend's
+  P/E button hides the line.
+- **Not drawn**: on one day to three months, where earnings rarely change and the line would retrace the
+  price; while the twelve months show a loss; when the earnings are in another currency than the listing
+  (Apple in Zurich, TSMC in New York, which reports in Taiwan dollars); when the filings carry no earnings
+  per share for recent years (Berkshire Hathaway); and when a foreign company's P/E from its filings is above
+  1.5 times the feed's own or below two-thirds of it, which is taken to mean its depositary share stands for
+  a different number of ordinary ones (Shell, BP). The panel says which.
+- **The feed's P/E**: the key figures show the feed's own P/E. For Apple, Microsoft and NVIDIA the two agreed
+  within 0.1 when this was written.
+- The earnings come from the cached statements in `.cache/edgar`; copies made before this was added are
+  fetched again once. The split factors are kept six hours.
 
 ### iShares
 
