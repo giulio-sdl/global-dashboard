@@ -1,8 +1,10 @@
+import { CATALOG } from './catalog.js';
 import { hideTip, lineSvg, plotLine, showTip } from './chart.js';
 import { initCompany } from './company.js';
+import { initSearch } from './search.js';
 import { initDetail, openDetail, renderDetail } from './detail.js';
 import { changeOver, changeText, lineView, MODES, PERIOD_NAME, PERIOD_SHORT, PERIODS, setChange } from './periods.js';
-import { $, el, fmt, getJson, signed, store, timeLabel } from './util.js';
+import { $, el, fmt, getJson, postJson, signed, store, timeLabel } from './util.js';
 
 const SPARK_REFRESH_MS = 180_000;
 const BASES_REFRESH_MS = 600_000;
@@ -19,7 +21,8 @@ const REV_FULL = { '1d': 2, '6m': 25 };
 // `mode` is the view (short or long term). `sparks` are the trend lines for
 // `sparksFor`, the line period of the view they were loaded for. `bases` are
 // the closing levels every period is measured from.
-const state = { config: null, quotes: {}, sparks: {}, sparksFor: null, bases: {}, basesIncomplete: false, backup: {}, mode: 'short', lineRequest: 0, fetchedAt: null, intervalMs: 30_000, timer: null };
+// `editing` is whether the rows can be added, removed and pinned as tiles.
+const state = { config: null, quotes: {}, sparks: {}, sparksFor: null, bases: {}, basesIncomplete: false, backup: {}, mode: 'short', lineRequest: 0, fetchedAt: null, intervalMs: 30_000, timer: null, editing: false };
 
 function duration(minutes) {
   const m = Math.max(0, Math.round(minutes));
@@ -123,7 +126,7 @@ const columnsFor = (group) => [
   group.markets ? ['Since close', 'c-ext'] : ['52-wk range', 'c-range'],
 ];
 
-function buildRow(item, sinceClose) {
+function buildRow(item, sinceClose, group) {
   const tr = el('tr', { 'data-sym': item.symbol });
   tr.item = item;
   // The whole row opens the detail panel; the name is a real button so the
@@ -136,6 +139,7 @@ function buildRow(item, sinceClose) {
       // Figures that move under the name where the card is too narrow for their columns.
       el('span', { class: 'sub oh' }),
       el('span', { class: 'sub multi' }),
+      ...(group.key ? [buildRowEdit(item, group)] : []),
     ),
     el('td', { class: 'c-last last', text: '—' }),
     ...CHANGE_COLUMNS.map(([, cls]) => el('td', { class: cls }, el('span', { class: 'chip na', text: '—' }))),
@@ -174,12 +178,183 @@ function buildTable(group, repeatHeader) {
     head.append(el('th', { scope: 'col', class: cls }, text));
   }
   const body = el('tbody');
-  for (const item of group.items) body.append(buildRow(item, headed));
+  for (const item of group.items) body.append(buildRow(item, headed, group));
   const table = el('table', { class: headed ? 'quote after' : group.yields ? 'quote yields' : 'quote' }, el('thead', { class: silent ? 'silent' : '' }, head), body);
-  if (!headed) return table;
+  // A table with every row removed (or one waiting for its first) shows only while editing.
+  const empty = !group.items.length;
+  table.classList.toggle('empty', empty);
   const fragment = document.createDocumentFragment();
-  fragment.append(el('div', { class: 'group-head' }, el('h4', { text: group.label }), buildPills(group.markets)), table);
+  if (headed) fragment.append(el('div', { class: empty ? 'group-head empty' : 'group-head' }, el('h4', { text: group.label }), buildPills(group.markets)));
+  fragment.append(table);
+  if (group.key) fragment.append(buildAdder(group));
   return fragment;
+}
+
+// ---- editing the rows ---------------------------------------------------------
+
+// Shown on each row while editing: show it as a tile at the top, or remove it.
+function buildRowEdit(item, group) {
+  const pinned = state.config.overview.includes(item.symbol);
+  const pin = el('button', {
+    type: 'button', class: 'edit-btn pin', 'aria-pressed': String(pinned), text: '★',
+    'aria-label': `Show ${item.name} as a tile`, title: pinned ? 'Shown as a tile at the top. Click to remove the tile.' : 'Show as a tile at the top',
+  });
+  const remove = el('button', { type: 'button', class: 'edit-btn remove', text: '×', 'aria-label': `Remove ${item.name}`, title: 'Remove this row' });
+  pin.addEventListener('click', (event) => {
+    event.stopPropagation();
+    changeLayout('tile', { symbol: item.symbol, pinned: !pinned });
+  });
+  remove.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    if (!await changeLayout('remove', { symbol: item.symbol })) return;
+    // Undoing adds it back to the same table. A default row returns to its old
+    // place, with its tile; one added from the page goes back at the end.
+    showToast(`Removed ${item.name}`, 'Undo', () => addRow({ group: group.key, symbol: item.symbol, name: item.name, note: item.note, unit: item.unit }));
+  });
+  return el('span', { class: 'row-edit' }, pin, remove);
+}
+
+// Under each table while editing: a button that opens a small form. The
+// symbol is checked against the quote feed by the server before the row is
+// added. Without a name the feed's own is used.
+function buildAdder(group) {
+  const suggestions = CATALOG[group.key] ?? [];
+  const listId = `suggest-${group.key.replace(/\W+/g, '-')}`;
+  const field = (name, label, attrs = {}) => el('input', { name, 'aria-label': label, placeholder: label, autocomplete: 'off', ...attrs });
+  const symbol = field('symbol', 'Symbol', { required: '', spellcheck: 'false', list: listId, placeholder: `Symbol${suggestions[0] ? `, e.g. ${suggestions[0].symbol}` : ''}` });
+  const optional = (name, label, maxlength) => field(name, label, { maxlength, 'aria-label': `${label} (optional)` });
+  const name = optional('name', 'Name', '40');
+  const note = optional('note', 'Note', '60');
+  const withUnits = [...group.items, ...suggestions].some((item) => item.unit);
+  const unit = withUnits ? optional('unit', 'Unit', '20') : null;
+  const message = el('p', { class: 'add-msg', role: 'status' });
+  const fields = el('fieldset', {},
+    el('legend', { class: 'sr-only', text: `Add a row to ${group.label}` }),
+    symbol, name, note, ...(unit ? [unit] : []),
+    el('button', { type: 'submit', class: 'control add-go', text: 'Add' }),
+    el('button', { type: 'button', class: 'control add-cancel', text: 'Cancel' }),
+  );
+  const form = el('form', { class: 'add-form' },
+    fields,
+    el('datalist', { id: listId }, ...suggestions.map((s) => el('option', { value: s.symbol, label: [s.name, s.note].filter(Boolean).join(' · ') }))),
+    message,
+    el('p', { class: 'add-hint', text: 'Symbols as the CNBC quote feed writes them: .FCHI for an index, @OJ.1 for a front-month future, GBP= for a currency, DOGE.CM= for a coin, IEF for a US share or fund.' }),
+  );
+  form.hidden = true;
+  const open = el('button', { type: 'button', class: 'add-open', text: '+ Add a row' });
+
+  // Picking a suggestion fills in its name, note and unit, unless they were typed.
+  let filled = null;
+  symbol.addEventListener('input', () => {
+    const match = suggestions.find((s) => s.symbol === symbol.value.trim().toUpperCase());
+    for (const [input, key] of [[name, 'name'], [note, 'note'], [unit, 'unit']]) {
+      if (!input || (input.value && input.value !== filled?.[key])) continue;
+      input.value = match?.[key] ?? '';
+    }
+    filled = match ?? null;
+  });
+  const show = (shown) => {
+    form.hidden = !shown;
+    open.hidden = shown;
+    if (shown) symbol.focus();
+  };
+  open.addEventListener('click', () => show(true));
+  $('.add-cancel', form).addEventListener('click', () => { form.reset(); message.textContent = ''; show(false); });
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    // Read before the fields are disabled: disabled fields are left out of a form's data.
+    const entered = Object.fromEntries(new FormData(form));
+    fields.disabled = true;
+    message.className = 'add-msg';
+    message.textContent = 'Checking with the quote feed…';
+    const added = await addRow({ group: group.key, ...entered }, message);
+    fields.disabled = false;
+    if (!added) symbol.focus();
+  });
+  form.show = show;
+  return el('div', { class: 'adder', 'data-group': group.key }, open, form);
+}
+
+// Adds a row and shows it, lit up for a moment. With `message` (the add
+// form's), trouble is said there; otherwise in a toast. True once added.
+async function addRow(fields, message) {
+  const symbol = fields.symbol.trim().toUpperCase();
+  const config = await postLayout('add', fields, message);
+  if (!config) return false;
+  rebuild(config);
+  // The form of that table stays open for the next one.
+  const adder = document.querySelector(`.adder[data-group="${CSS.escape(fields.group)}"]`);
+  const row = adder?.previousElementSibling.querySelector(`tr[data-sym="${CSS.escape(symbol)}"]`);
+  if (message && adder) {
+    $('.add-form', adder).show(true);
+    $('.add-msg', adder).textContent = `Added ${row?.item.name ?? symbol}.`;
+  }
+  row?.classList.add('just-added');
+  row?.scrollIntoView({ block: 'nearest' });
+  return true;
+}
+
+async function changeLayout(action, fields) {
+  const config = await postLayout(action, fields);
+  if (config) rebuild(config);
+  return Boolean(config);
+}
+
+async function postLayout(action, fields, message) {
+  try {
+    return (await postJson(`/api/layout/${action}`, fields)).config;
+  } catch (err) {
+    if (message) {
+      message.className = 'add-msg error';
+      message.textContent = err.message;
+    } else {
+      showToast(err.message);
+    }
+    return null;
+  }
+}
+
+// A short note at the foot of the window, with an action to take (Undo).
+let toastTimer = null;
+function showToast(text, label, action) {
+  const toast = $('#toast');
+  const button = $('button', toast);
+  $('span', toast).textContent = text;
+  button.hidden = !action;
+  button.textContent = label ?? '';
+  button.onclick = () => { toast.hidden = true; action(); };
+  toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 8_000);
+}
+
+function setEditing(editing) {
+  state.editing = editing;
+  document.body.classList.toggle('editing', editing);
+  const button = $('#edit');
+  button.textContent = editing ? 'Done' : 'Edit rows';
+  button.setAttribute('aria-pressed', String(editing));
+  $('#reset').hidden = !editing;
+  if (!editing) for (const form of document.querySelectorAll('.add-form')) form.show(false);
+}
+
+function initEditing() {
+  $('#edit').hidden = !state.config.editable;
+  $('#edit').addEventListener('click', () => setEditing(!state.editing));
+  // Restoring the defaults throws away every change, so it asks for a second click.
+  const reset = $('#reset');
+  let armed = null;
+  reset.addEventListener('click', async () => {
+    if (!armed) {
+      reset.textContent = 'Click again to restore';
+      armed = setTimeout(() => { armed = null; reset.textContent = 'Restore defaults'; }, 4_000);
+      return;
+    }
+    clearTimeout(armed);
+    armed = null;
+    reset.textContent = 'Restore defaults';
+    if (await changeLayout('reset', {})) showToast('Back to the default rows and tiles');
+  });
 }
 
 function buildMatrix(group) {
@@ -215,6 +390,9 @@ function buildTile(item) {
   return tile;
 }
 
+// Builds the sections and tiles, or builds them again after the rows have
+// changed: each section takes the place of the one before, so the page stays
+// where it was scrolled to.
 function build(config) {
   const main = $('#main');
   const items = new Map();
@@ -233,9 +411,37 @@ function build(config) {
       });
       cards.append(article);
     }
-    main.append(el('section', { id: section.id }, el('h2', { text: section.title }), cards));
+    const built = el('section', { id: section.id }, el('h2', { text: section.title }), cards);
+    const before = document.getElementById(section.id);
+    if (before) before.replaceWith(built);
+    else main.append(built);
   }
-  $('#tiles').append(...config.overview.filter((symbol) => items.has(symbol)).map((symbol) => buildTile(items.get(symbol))));
+  $('#tiles').replaceChildren(...config.overview.filter((symbol) => items.has(symbol)).map((symbol) => buildTile(items.get(symbol))));
+}
+
+// After a change to the rows, made here or on another page: the new rows are
+// drawn with what is known, and everything is fetched again for them.
+function rebuild(config) {
+  state.config = config;
+  build(config);
+  labelColumns();
+  render();
+  refreshQuotes();
+  refreshBases();
+  loadLines({ quiet: true });
+}
+
+let reloading = false;
+async function reloadLayout() {
+  if (reloading) return;
+  reloading = true;
+  try {
+    rebuild(await getJson('/api/config'));
+  } catch {
+    // The next refresh notices again.
+  } finally {
+    reloading = false;
+  }
 }
 
 // ---- rendering quotes -------------------------------------------------------
@@ -431,6 +637,8 @@ function showBanner(message, kind = 'quotes') {
 async function refreshQuotes() {
   try {
     const data = await getJson('/api/quotes');
+    // The rows were changed on another page (the Mac app, another browser).
+    if (data.layout && data.layout !== state.config.version) reloadLayout();
     // A symbol missing from this refresh keeps its last known quote.
     state.quotes = { ...state.quotes, ...data.quotes };
     state.fetchedAt = data.fetchedAt;
@@ -470,15 +678,20 @@ async function loadLines({ quiet = false } = {}) {
 function showMode(mode) {
   state.mode = mode;
   store('mode', mode);
-  const { periods, line } = MODES[mode];
   for (const button of document.querySelectorAll('#modes button')) button.setAttribute('aria-pressed', String(button.dataset.mode === mode));
+  labelColumns();
+  render();
+  loadLines();
+}
+
+// Each table's column headers name the periods of the view.
+function labelColumns() {
+  const { periods, line } = MODES[state.mode];
   for (const label of document.querySelectorAll('thead [data-slot]')) {
     const bp = label.closest('table').classList.contains('yields') ? ' bp' : '';
     label.textContent = PERIOD_SHORT[periods[label.dataset.slot]] + bp;
   }
   for (const label of document.querySelectorAll('thead .c-spark span')) label.textContent = PERIOD_NAME[line];
-  render();
-  loadLines();
 }
 
 // The closing levels behind every change. On a cold start the server is
@@ -503,13 +716,20 @@ async function refreshBases() {
     // shortly. When rows have just been filled, fetch their trend lines too.
     // (A gap that never fills keeps this asking, but not the lines.)
     if (filling && filled) loadLines({ quiet: true });
-    if (data.incomplete) setTimeout(refreshBases, BASES_RETRY_MS);
+    if (data.incomplete) retryBases();
   } catch {
     if (!state.bases['1w']) {
       showBanner(HISTORY_MISSING, 'history');
-      setTimeout(refreshBases, BASES_RETRY_MS);
+      retryBases();
     }
   }
+}
+
+// One retry waiting at a time, however many refreshes asked for one.
+let basesRetry = null;
+function retryBases() {
+  clearTimeout(basesRetry);
+  basesRetry = setTimeout(refreshBases, BASES_RETRY_MS);
 }
 
 function schedule() {
@@ -537,10 +757,11 @@ function applyTheme(theme) {
 // the page is scrolled to the end (it may be too short to get that high).
 function initTabs() {
   const links = [...document.querySelectorAll('.tabs a')];
-  const sections = [...document.querySelectorAll('#main > section')];
   let queued = false;
   const mark = () => {
     queued = false;
+    // Looked up each time: the sections are built again when the rows change.
+    const sections = [...document.querySelectorAll('#main > section')];
     const atEnd = innerHeight + scrollY >= document.documentElement.scrollHeight - 2;
     const passed = sections.filter((section) => section.getBoundingClientRect().top <= innerHeight / 3);
     const current = atEnd ? sections.at(-1) : passed.at(-1) ?? sections[0];
@@ -597,6 +818,7 @@ async function init() {
   initControls();
   initDetail(detailContext);
   initCompany();
+  initSearch();
   try {
     state.config = await getJson('/api/config');
   } catch (err) {
@@ -604,6 +826,7 @@ async function init() {
     return;
   }
   build(state.config);
+  initEditing();
   initTabs();
   renderPills();
   await refreshQuotes();

@@ -1,15 +1,19 @@
 // Zero-dependency server: serves the dashboard and proxies market data so the
 // browser never talks to the data provider directly.
 import http from 'node:http';
+import https from 'node:https';
+import dns from 'node:dns';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createEdgar } from './edgar.js';
+import { createEdgar, trailingEarnings } from './edgar.js';
 import { loadFredSeries, weekly as weeklyBars } from './fred.js';
 import { loadHoldings } from './holdings.js';
-import { MARKETS, OVERVIEW, SECTIONS } from './instruments.js';
+import { MARKETS } from './instruments.js';
+import { openLayout, Refusal } from './layout.js';
 import { betweenDailyCloses, HOUR_BAR_MS, MINUTE_BAR_MS, momentBefore, priceAt, rangeSince } from './rolling.js';
 import { sinceClose } from './sinceclose.js';
+import { valuationMeasures } from './valuation.js';
 
 const PORT = Number(process.env.PORT) || 5177;
 // Only this computer can reach the server unless HOST says otherwise; a
@@ -30,6 +34,7 @@ const edgarFinancials = createEdgar({ contact: process.env.SEC_CONTACT || SETTIN
 
 const QUOTE_URL = 'https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol';
 const BARS_URL = 'https://ts-api.cnbc.com/harmony/app/bars';
+const LOOKUP_URL = 'https://symlookup.cnbc.com/symservice/symlookup.do';
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
 const QUOTE_TTL_MS = 10_000;
@@ -50,26 +55,87 @@ const SPARK_MIN_BARS = 6;
 const SPARK_MAX_POINTS = 300;
 const DAY_MS = 24 * 3600_000;
 
-const SYMBOLS = [...new Set(SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) => g.items.map((i) => i.symbol)))).filter(Boolean))];
+// What the page shows: the defaults in instruments.js with the changes made
+// from the page, kept in layout.local.json (see layout.js). The lists below
+// are drawn from it, and drawn again whenever it changes; everything that
+// reads them does so when it runs, so a row added from the page is picked up.
+const LAYOUT = await openLayout(path.join(ROOT, 'layout.local.json'));
+let layoutVersion; // changes with every edit, so that open pages know to fetch the layout again
 
-// Where each row's chart history comes from: its own symbol, unless it names another.
-const CHART_SYMBOL = new Map(SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) =>
-  g.items.filter((item) => item.symbol).map((item) => [item.symbol, item.chart ?? item.symbol])))));
+let SYMBOLS;
+let CHART_SYMBOL; // where each row's chart history comes from: its own symbol, unless it names another
+let FRED_SERIES; // rows with a second source for their history: the FRED series each one names
+let PROXIED; // indexes whose move since the close is read from a future or ETF that keeps trading
+let PROXY_SYMBOLS;
+let INDEX_ITEMS; // indexes whose constituents the detail panel shows
+let ROLLING; // rows priced round the clock (see "markets that never close")
 
-// Rows with a second source for their history: the FRED series each one names.
-const FRED_SERIES = new Map(SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) =>
-  g.items.filter((item) => item.fred).map((item) => [item.symbol, item.fred])))));
+function applyLayout() {
+  const rows = LAYOUT.current().sections.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) =>
+    g.items.filter((item) => item.symbol).map((item) => ({ ...item, market: item.market ?? g.markets?.[0] })))));
+  SYMBOLS = [...new Set(rows.map((item) => item.symbol))];
+  CHART_SYMBOL = new Map(rows.map((item) => [item.symbol, item.chart ?? item.symbol]));
+  FRED_SERIES = new Map(rows.filter((item) => item.fred).map((item) => [item.symbol, item.fred]));
+  PROXIED = rows.filter((item) => item.proxy).map((item) => ({ symbol: item.symbol, market: item.market, proxy: item.proxy.symbol }));
+  PROXY_SYMBOLS = [...new Set(PROXIED.map((p) => p.proxy))];
+  INDEX_ITEMS = new Map(rows.filter((item) => item.holdings).map((item) => [item.symbol, item]));
+  ROLLING = rows.filter((item) => item.rolling).map((item) => item.symbol);
+  layoutVersion = Math.max(Date.now(), (layoutVersion ?? 0) + 1);
+}
+applyLayout();
 
-// Indexes whose move since the close is read from a future or ETF that keeps trading.
-const PROXIED = SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) =>
-  g.items.filter((item) => item.proxy).map((item) => ({ symbol: item.symbol, market: item.market ?? g.markets?.[0], proxy: item.proxy.symbol })))));
-const PROXY_SYMBOLS = [...new Set(PROXIED.map((p) => p.proxy))];
 const PROXY_DAYS_BACK = 7; // far enough to reach the last close across a long weekend
 
+// The Mac's own resolver now and then says one of the feed's hosts does not
+// exist, for a minute or so at a time, while the DNS server answers for it as
+// usual: on 2026-10-23 symlookup.cnbc.com, the search box's lookup, failed
+// that way while quote.cnbc.com, on the same address, did not. Such a request
+// is made again with the host's address asked of the DNS server directly.
+const UNRESOLVED = new Set(['ENOTFOUND', 'EAI_AGAIN']);
+
 async function fetchJson(url, timeoutMs = 12_000) {
-  const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' }, signal: AbortSignal.timeout(timeoutMs) });
+  const headers = { 'User-Agent': USER_AGENT, Accept: 'application/json' };
+  let res;
+  try {
+    res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (err) {
+    if (!UNRESOLVED.has(err.cause?.code)) throw err;
+    return getJsonResolvedDirectly(url, headers, timeoutMs);
+  }
   if (!res.ok) throw new Error(`${new URL(url).hostname} responded ${res.status}`);
   return res.json();
+}
+
+// dns.lookup's answer, from the DNS server instead of the system resolver.
+function resolveDirectly(hostname, options, callback) {
+  dns.resolve4(hostname, (err, addresses) => {
+    if (err) callback(err);
+    else if (options.all) callback(null, addresses.map((address) => ({ address, family: 4 })));
+    else callback(null, addresses[0], 4);
+  });
+}
+
+function getJsonResolvedDirectly(url, headers, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers, lookup: resolveDirectly, signal: AbortSignal.timeout(timeoutMs) }, (res) => {
+      if (res.statusCode < 200 || res.statusCode > 299) {
+        res.resume();
+        reject(new Error(`${new URL(url).hostname} responded ${res.statusCode}`));
+        return;
+      }
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        } catch (err) {
+          reject(err);
+        }
+      });
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+  });
 }
 
 // Marks a result as missing some of its symbols and names them, without the
@@ -114,7 +180,7 @@ function cached(ttlMs, load, patienceMs = 2_500) {
     stuck = same && !failed.outage ? stuck + 1 : 0;
     retryAt = failed ? Date.now() + RETRY_INCOMPLETE_MS * 2 ** Math.min(stuck, 10) : Infinity;
   };
-  return async () => {
+  const get = async () => {
     const stale = !value || Date.now() - at >= ttlMs;
     if (!stale && Date.now() < retryAt) return { value, at, error: null };
     pending ??= load(stale ? null : value)
@@ -129,6 +195,22 @@ function cached(ttlMs, load, patienceMs = 2_500) {
     if (!value) throw new Error(error || 'no data');
     return { value, at, error };
   };
+  // For rows just added to the page: the symbols the value lacks are fetched
+  // at once, alone, the way failed ones are topped up, rather than waiting
+  // for the next full load. Resolves once they have been asked for. A load
+  // already under way began with the old list of rows, so it is let finish first.
+  get.include = async (symbols) => {
+    while (pending) await pending;
+    if (!value) return; // the first load asks for every row anyway
+    const absent = symbols.filter((symbol) => !(symbol in value));
+    if (!absent.length) return;
+    value = markIncomplete({ ...value }, [...new Set([...(value[INCOMPLETE] ?? []), ...absent])]);
+    retryAt = 0;
+    stuck = 0;
+    get().catch(() => {});
+    await pending;
+  };
+  return get;
 }
 
 // ---- quotes ---------------------------------------------------------------
@@ -175,6 +257,7 @@ function amount(text) {
 // share's summary page. Indexes, futures and currencies have none.
 function companyStats(raw) {
   if (raw.mktcapView == null && raw.pe == null && raw.sharesout == null) return null;
+  const millions = amount(raw.enterpriseValue);
   return {
     exchange: raw.exchange || null,
     open: amount(raw.open),
@@ -187,6 +270,7 @@ function companyStats(raw) {
     eps: amount(raw.eps),
     forwardEps: amount(raw.feps),
     priceToSales: amount(raw.psales),
+    enterpriseValue: millions == null ? null : millions * 1e6,
     dividend: amount(raw.dividend),
     dividendYield: amount(raw.dividendyield),
     beta: amount(raw.beta),
@@ -350,11 +434,6 @@ async function loadQuotes() {
 
 // ---- index constituents -----------------------------------------------------
 
-const INDEX_ITEMS = new Map(
-  SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) => g.items)))
-    .filter((item) => item.holdings)
-    .map((item) => [item.symbol, item]),
-);
 const lastLiveDetail = new Map();
 
 // One cached loader per key, made on first use.
@@ -474,11 +553,75 @@ async function constituent(indexSymbol, symbol) {
   return { item, priced, ...row };
 }
 
+// Without an index it is any share, found from the search box.
 async function getCompany(indexSymbol, symbol) {
+  if (!indexSymbol) return getShare(symbol);
   const { item, priced, holding, quote } = await constituent(indexSymbol, symbol);
   const filings = await edgarFinancials({ ticker: holding.ticker, names: [quote.fullName, holding.name].filter(Boolean), us: !/-[A-Z]{2}$/.test(symbol) });
-  const company = { symbol, ticker: holding.ticker, name: quote.fullName || holding.name, sector: holding.sector, weight: holding.weight, index: item.name, quote, filings };
+  const company = { symbol, ticker: holding.ticker, name: quote.fullName || holding.name, sector: holding.sector, weight: holding.weight, index: item.name, quote, ...await withEarnings(symbol, quote, filings) };
   return { value: company, at: priced.at, error: priced.error };
+}
+
+// ---- any share, found by its symbol -------------------------------------------
+
+// The search box offers what the feed's own symbol lookup finds: instruments
+// whose symbol or name starts with the text typed, in the order it ranks them.
+// A company listed in several countries comes once, under the first country
+// the lookup lists it in (its home market, in practice), unless another
+// listing's symbol is typed exactly; share classes in one country (BRK.A and
+// BRK.B) all come. Answers are kept ten minutes.
+const SEARCH_TTL_MS = 10 * 60_000;
+const SEARCH_KEPT = 200;
+const SEARCH_SHOWN = 10;
+const searches = new Map(); // what was typed → { at, results }, oldest first
+
+async function search(text) {
+  const query = String(text ?? '').trim().slice(0, 40);
+  const key = query.toLowerCase();
+  if (!key) return { value: [], at: Date.now(), error: null };
+  const kept = searches.get(key);
+  if (kept && Date.now() - kept.at < SEARCH_TTL_MS) return { value: kept.results, at: kept.at, error: null };
+  const params = new URLSearchParams({ prefix: query, partnerid: '20064', pgok: '1', pgsize: '20' });
+  const found = [].concat((await fetchJson(`${LOOKUP_URL}?${params}`, QUOTE_TIMEOUT_MS)) ?? []).filter((entry) => entry?.symbolName);
+  const home = new Map(); // issuer → the country it was first listed under
+  const results = [];
+  for (const entry of found) {
+    const issuer = entry.issuerId ?? entry.symbolName;
+    const exact = entry.symbolName.toLowerCase() === key;
+    if (home.has(issuer) && home.get(issuer) !== entry.countryCode && !exact) continue;
+    if (!home.has(issuer)) home.set(issuer, entry.countryCode);
+    results.push({ symbol: entry.symbolName, name: entry.companyName || entry.symbolName, type: entry.issueType || null, exchange: entry.exchangeName || null, exact });
+  }
+  // The symbol typed, where there is one, leads.
+  results.sort((a, b) => b.exact - a.exact);
+  const shown = results.slice(0, SEARCH_SHOWN).map(({ exact, ...result }) => result);
+  searches.delete(key);
+  searches.set(key, { at: Date.now(), results: shown });
+  if (searches.size > SEARCH_KEPT) searches.delete(searches.keys().next().value);
+  return { value: shown, at: Date.now(), error: null };
+}
+
+// A share opened from the search box has the same panel as an index's
+// constituent, with its quote and key figures fetched on their own. Any symbol
+// the quote feed prices will do.
+const SHARE_SYMBOL = /^[^\s|,]{1,24}$/;
+const shareQuote = keyed(CONSTITUENT_TTL_MS, async (symbol) => {
+  const quote = (await fetchQuotes([symbol], true))[symbol];
+  if (!quote) throw new Error(`the quote feed has no price for ${symbol}`);
+  return quote;
+});
+
+async function quoteOfShare(symbol) {
+  if (!SHARE_SYMBOL.test(symbol ?? '')) throw new Error('that is not a symbol');
+  return shareQuote(symbol, symbol);
+}
+
+async function getShare(symbol) {
+  const priced = await quoteOfShare(symbol);
+  const quote = priced.value;
+  const filings = await edgarFinancials({ ticker: symbol, names: [quote.fullName].filter(Boolean), us: !/-[A-Z]{2}$/.test(symbol) });
+  const share = { symbol, ticker: symbol, name: quote.fullName || symbol, quote, ...await withEarnings(symbol, quote, filings) };
+  return { value: share, at: priced.at, error: priced.error };
 }
 
 // ---- intraday sparklines --------------------------------------------------
@@ -493,8 +636,10 @@ function loadBars(symbol, interval, daysBack) {
   return loadBarsBetween(symbol, interval, Math.floor((now - daysBack * DAY_MS) / 3600_000) * 3600_000, now + DAY_MS);
 }
 
-async function loadBarsBetween(symbol, interval, start, end) {
-  const url = `${BARS_URL}/${encodeURIComponent(symbol)}/${interval}/${stamp(new Date(start))}/${stamp(new Date(end))}/adjusted/GMT.json`;
+// Prices are adjusted for stock splits (only for splits: not for dividends);
+// `basis` 'unadjusted' gives them as they traded.
+async function loadBarsBetween(symbol, interval, start, end, basis = 'adjusted') {
+  const url = `${BARS_URL}/${encodeURIComponent(symbol)}/${interval}/${stamp(new Date(start))}/${stamp(new Date(end))}/${basis}/GMT.json`;
   const data = await fetchJson(url);
   // Each bar is [time, close, high, low]. The feed marks a missing high or low
   // with a negative number; the close stands in for it.
@@ -752,15 +897,15 @@ async function loadRange(range) {
   return { value: sparks, at: charted.at, error: charted.error || daily.error || weekly?.error || null };
 }
 
-// The same for one constituent of an index, for the chart in its company
-// panel: its line over a period and the close that period is measured from.
-// Fetched when the chart is asked for and kept as long as the intraday lines.
-const chartOf = keyed(SPARK_TTL_MS, async (indexSymbol, symbol, range) => {
+// The same for one company, for the chart in its panel: its line over a
+// period and the close that period is measured from. Fetched when the chart is
+// asked for and kept as long as the intraday lines.
+const chartOf = keyed(SPARK_TTL_MS, async (symbol, range, latestQuote) => {
   const spec = RANGES[range];
   if (!spec) return { spark: await intraday(symbol), from: null };
   // The quote is looked up on every load: the session it belongs to moves on
   // from day to day, and the period is counted back from it.
-  const { quote } = await constituent(indexSymbol, symbol);
+  const quote = await latestQuote();
   const source = HISTORY[spec.chart];
   const [daily, charted] = await Promise.all([
     loadBars(symbol, HISTORY.day.interval, HISTORY.day.daysBack),
@@ -773,10 +918,102 @@ const chartOf = keyed(SPARK_TTL_MS, async (indexSymbol, symbol, range) => {
   return line ?? { spark: null, from: null };
 });
 
+// From an index's panel only its own constituents are charted; any other
+// share must be one the quote feed prices.
 async function getChart(indexSymbol, symbol, range) {
-  await constituent(indexSymbol, symbol); // only an index's own constituents are charted
+  const latestQuote = indexSymbol ? async () => (await constituent(indexSymbol, symbol)).quote : async () => (await quoteOfShare(symbol)).value;
+  await latestQuote();
   const period = RANGES[range] ? range : '1d';
-  return chartOf(`${indexSymbol}|${symbol}|${period}`, indexSymbol, symbol, period);
+  return chartOf(`${indexSymbol ?? ''}|${symbol}|${period}`, symbol, period, latestQuote);
+}
+
+// ---- the earnings behind the P/E line ---------------------------------------------
+
+// How many of today's shares one share was, week by week: the feed's prices as
+// they traded over its split-adjusted ones. That changes only at a split, so
+// it is kept as the weeks it changes in, [time, factor]: for NVIDIA 40 up to
+// its split of July 2021, 10 up to June 2024, then 1.
+const SPLIT_YEARS = 13; // as far back as the earnings kept (see edgar.js), and a year more
+const splitsOf = keyed(HISTORY.week.ttlMs, async (symbol) => {
+  const end = Date.now() + DAY_MS;
+  const start = end - SPLIT_YEARS * 366 * DAY_MS;
+  const [adjusted, traded] = await Promise.all([loadBarsBetween(symbol, '1W', start, end), loadBarsBetween(symbol, '1W', start, end, 'unadjusted')]);
+  const tradedAt = new Map(traded.map(([t, close]) => [t, close]));
+  const steps = [];
+  for (const [t, close] of adjusted) {
+    const factor = tradedAt.get(t) / close;
+    if (Number.isFinite(factor) && (!steps.length || Math.abs(factor / steps.at(-1)[1] - 1) > 0.01)) steps.push([t, factor]);
+  }
+  if (!steps.length) throw new Error('the price history to find its stock splits in is not loading');
+  return steps;
+});
+
+// The factor on a date: that of the last week begun by then.
+const factorOn = (steps) => (date) => {
+  const t = Date.parse(date);
+  let factor = steps[0][1];
+  for (const [at, value] of steps) {
+    if (at > t) break;
+    factor = value;
+  }
+  return factor;
+};
+
+// A company's statements for its panel, the trailing earnings per share its
+// P/E line is drawn from, and its valuation measures. The filings behind
+// those stay here.
+async function withEarnings(symbol, quote, { eps, valuation: basis, ...filings }) {
+  const earnings = earningsOf(symbol, quote, filings, eps);
+  const valuation = valuationOf(symbol, quote, filings, basis, earnings);
+  return { filings, earnings: await earnings, valuation: await valuation };
+}
+
+// Daily closes back to the earliest period valued, for the price at each
+// period's end.
+const closesSince = keyed(HISTORY.day.ttlMs, async (symbol, since) => {
+  const bars = await loadBarsBetween(symbol, '1D', since, Date.now() + DAY_MS);
+  // An empty answer is the feed struggling (see the history loaders).
+  if (!bars.length) throw new Error('no price history just now');
+  return bars;
+});
+
+// Yahoo's valuation measures, today's and at the end of each recent period
+// (see valuation.js). Figures filed in another currency than the price are
+// not set against it: then there are only the quote feed's own, for today.
+async function valuationOf(symbol, quote, filings, basis, earnings) {
+  if (filings.status !== 'ok' || !basis?.periods.length || (quote.currency && quote.currency !== filings.currency)) return valuationMeasures({ quote });
+  const since = Date.parse(basis.periods.at(-1).end) - 10 * DAY_MS;
+  const [closes, steps, { status, trailing }] = await Promise.all([
+    closesSince(`${symbol}|${since}`, symbol, since).then((loaded) => loaded.value, () => null),
+    splitsOf(symbol, symbol).then((loaded) => loaded.value, () => null),
+    earnings.catch(() => ({})),
+  ]);
+  return valuationMeasures({ quote, basis, trailing: status === 'ok' ? trailing : null, closes, splitFactor: steps && factorOn(steps) });
+}
+
+// The twelve months' earnings per share as each report made them known, in
+// today's shares (see trailingEarnings in edgar.js), or why there are none.
+async function earningsOf(symbol, quote, filings, eps) {
+  if (filings.status !== 'ok' || !eps?.length) return { status: 'none' };
+  // A price in one currency is not divided by earnings in another: a US
+  // company's listing abroad, or a company abroad that reports at home.
+  if (quote.currency && quote.currency !== filings.currency) return { status: 'currency', reported: filings.currency, quoted: quote.currency };
+  let steps;
+  try {
+    steps = (await splitsOf(symbol, symbol)).value;
+  } catch (err) {
+    return { status: 'error', message: err.message || String(err) };
+  }
+  const trailing = trailingEarnings(eps, factorOn(steps));
+  if (!trailing.length) return { status: 'none' };
+  // A company abroad files its earnings per ordinary share, and the depositary
+  // share quoted in New York may stand for several (two for Shell, six for
+  // BP), which no filing states. Where the feed's own P/E is far from this
+  // one, that is taken to be the case and the line is left out.
+  const pe = quote.last / trailing.at(-1).eps;
+  const feeds = quote.stats?.pe;
+  if (/^(20|40)-F/.test(filings.latest?.form ?? '') && feeds > 0 && pe > 0 && Math.abs(Math.log(pe / feeds)) > Math.log(1.5)) return { status: 'shares', pe, feeds };
+  return { status: 'ok', currency: filings.currency, trailing };
 }
 
 // ---- markets that never close -------------------------------------------------
@@ -786,8 +1023,7 @@ async function getChart(indexSymbol, symbol, range) {
 // the same time of day so many months back. `read` is where the price at that
 // moment comes from: ten-minute bars reach a week back, hourly ones about
 // three months, and beyond that there are only daily closes to place it between.
-const ROLLING = SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) =>
-  g.items.filter((item) => item.rolling).map((item) => item.symbol))));
+// The rows measured this way are `ROLLING`, at the top.
 const SPANS = {
   '1d': { hours: 24, read: 'minutes' },
   '1w': { hours: 120, read: 'minutes' },
@@ -918,7 +1154,7 @@ async function warmUp() {
 // ---- http -----------------------------------------------------------------
 
 const getQuotes = cached(QUOTE_TTL_MS, loadQuotes);
-const getIntraday = cached(SPARK_TTL_MS, () => forEachSymbol(loadSpark));
+const getIntraday = cached(SPARK_TTL_MS, (known) => forEachSymbol(loadSpark, SYMBOLS, SPARK_CONCURRENCY, known));
 // The lines of the day: each row's latest session, and the last 24 hours for a
 // round-the-clock row.
 async function loadDay() {
@@ -933,6 +1169,121 @@ async function loadDay() {
 }
 
 const getSparks = (range) => (RANGES[range] ? loadRange(range) : loadDay());
+
+// ---- editing the layout -------------------------------------------------------
+
+// Rows are added, removed and pinned as tiles from the page, but only from
+// this computer: on a hosted copy visitors can look and not edit. A change
+// must also come from the dashboard's own page and not from another site open
+// in the same browser: so it has to be sent as JSON (which another site cannot
+// do without this server's leave), any origin it names must be this server,
+// and it must be addressed to a local name (a site whose own name is made to
+// lead here is turned away).
+const LOCAL_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+const LOCAL_NAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
+const hostname = (host) => { try { return new URL(`http://${host}`).hostname; } catch { return null; } };
+
+const mayEdit = (req) => LOCAL_ADDRESSES.has(req.socket.remoteAddress) && LOCAL_NAMES.has(hostname(req.headers.host));
+
+const sentFromPage = (req) => mayEdit(req)
+  && /^application\/json\b/.test(req.headers['content-type'] ?? '')
+  && (!req.headers.origin || req.headers.origin === `http://${req.headers.host}`);
+
+const configFor = (req) => ({ ...LAYOUT.current(), markets: MARKETS, editable: mayEdit(req), version: layoutVersion });
+
+function readJson(req, limit = 4096) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > limit) req.destroy(new Refusal('That request is too large.'));
+      else chunks.push(chunk);
+    });
+    req.on('end', () => {
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch { reject(new Refusal('That request is not JSON.')); }
+    });
+    req.on('error', reject);
+  });
+}
+
+const text = (value, max) => (typeof value === 'string' && value.trim().slice(0, max)) || undefined;
+const SYMBOL_FORM = /^[A-Z0-9.@=^_-]{1,24}$/;
+
+// The feed's name for an instrument, made to fit a row: "Orange Juice
+// (Nov'26)" becomes "Orange Juice", "IBEX 35 Idx" "IBEX 35", and
+// "Dogecoin/USD Coin Metrics" "Dogecoin".
+const shortName = (fullName) => fullName
+  ?.replace(/\s*\([A-Z][a-z]{2}'\d{2}\)$/, '')
+  .replace(/\/USD-? Coin Metrics$/, '')
+  .replace(/ (Index|Idx|FX Spot Rate|FX Cross Rate)$/i, '')
+  .trim() || null;
+
+// Fetches what a row needs that the caches lack: its quote, its lines and
+// the closes its changes are measured from. The page waits for this a few
+// seconds at most, so that a new row arrives filled in; whatever is slower
+// fills in on the page's next refresh.
+const FILL_PATIENCE_MS = 8_000;
+
+function fillRows(symbols) {
+  const rolling = symbols.filter((symbol) => ROLLING.includes(symbol));
+  const sources = [
+    [symbols, [getQuotes, getIntraday, ...Object.values(HISTORY).map((source) => source.get)]],
+    [rolling, [getMinutes, getHoursBack, getYearsBack]],
+  ];
+  const filled = Promise.all(sources.flatMap(([list, gets]) => (list.length ? gets.map((get) => get.include(list).catch(() => {})) : [])));
+  return Promise.race([filled, new Promise((resolve) => setTimeout(resolve, FILL_PATIENCE_MS))]);
+}
+
+const EDITS = {
+  // { group, symbol, name?, note?, unit? }: the symbol is checked against the
+  // quote feed first, so a mistyped one is not saved. Without a name the
+  // feed's own is used.
+  async add(body) {
+    const symbol = text(body.symbol, 24)?.toUpperCase();
+    if (!symbol || !SYMBOL_FORM.test(symbol)) throw new Refusal('That is not a symbol the quote feed uses.');
+    let quote;
+    try {
+      quote = (await fetchQuotes([symbol]))[symbol];
+    } catch (err) {
+      throw Object.assign(new Error(`The quote feed could not be reached to check ${symbol} (${err.message}).`), { status: 502 });
+    }
+    if (!quote) throw new Refusal(`The quote feed has no price for ${symbol}.`);
+    const item = { symbol, name: text(body.name, 40) ?? shortName(quote.fullName) ?? symbol, note: text(body.note, 60), unit: text(body.unit, 20), added: true };
+    // A coin priced by Coin Metrics trades round the clock and is measured like the others.
+    if (symbol.endsWith('.CM=')) item.rolling = true;
+    await LAYOUT.add(text(body.group, 200), item);
+    applyLayout();
+    await fillRows([symbol]);
+  },
+  // { symbol }
+  async remove(body) {
+    await LAYOUT.remove(text(body.symbol, 24));
+    applyLayout();
+  },
+  // { symbol, pinned }: shows a row as a tile at the top, or stops.
+  async tile(body) {
+    await LAYOUT.pin(text(body.symbol, 24), body.pinned === true);
+    applyLayout();
+  },
+  // Back to instruments.js as it is.
+  async reset() {
+    await LAYOUT.reset();
+    applyLayout();
+    await fillRows(SYMBOLS);
+  },
+};
+
+async function edit(req, res, action) {
+  if (req.method !== 'POST') return sendJson(res, 405, { error: 'Changes are sent with POST.' });
+  if (!sentFromPage(req)) return sendJson(res, 403, { error: 'The layout can only be changed from the dashboard on the computer running it.' });
+  try {
+    await action(await readJson(req));
+    sendJson(res, 200, { config: configFor(req) });
+  } catch (err) {
+    sendJson(res, err instanceof Refusal ? 400 : err.status ?? 500, { error: err.message });
+  }
+}
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 
@@ -965,13 +1316,17 @@ async function sendStatic(res, pathname) {
 http
   .createServer((req, res) => {
     const { pathname, searchParams } = new URL(req.url, 'http://localhost');
-    if (pathname === '/api/config') return sendJson(res, 200, { sections: SECTIONS, markets: MARKETS, overview: OVERVIEW });
-    if (pathname === '/api/quotes') return sendData(res, 'quotes', getQuotes);
+    if (pathname === '/api/config') return sendJson(res, 200, configFor(req));
+    // Each refresh says which layout it belongs to, so a page open while the
+    // layout was changed elsewhere (the Mac app and a browser) catches up.
+    if (pathname === '/api/quotes') return sendData(res, 'quotes', async () => ({ ...(await getQuotes()), layout: layoutVersion }));
+    if (pathname.startsWith('/api/layout/') && Object.hasOwn(EDITS, pathname.slice(12))) return edit(req, res, EDITS[pathname.slice(12)]);
     if (pathname === '/api/index') return sendData(res, 'detail', () => getIndexDetail(searchParams.get('symbol'), searchParams.get('range')));
     if (pathname === '/api/company') return sendData(res, 'company', () => getCompany(searchParams.get('index'), searchParams.get('symbol')));
     if (pathname === '/api/chart') return sendData(res, 'chart', () => getChart(searchParams.get('index'), searchParams.get('symbol'), searchParams.get('range')));
     if (pathname === '/api/bases') return sendData(res, 'bases', loadBases);
     if (pathname === '/api/sparks') return sendData(res, 'sparks', () => getSparks(searchParams.get('range')));
+    if (pathname === '/api/search') return sendData(res, 'results', () => search(searchParams.get('q')));
     return sendStatic(res, decodeURIComponent(pathname));
   })
   .listen(PORT, HOST, () => {
