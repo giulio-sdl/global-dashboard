@@ -1,6 +1,8 @@
 // Zero-dependency server: serves the dashboard and proxies market data so the
 // browser never talks to the data provider directly.
 import http from 'node:http';
+import https from 'node:https';
+import dns from 'node:dns';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -84,10 +86,56 @@ applyLayout();
 
 const PROXY_DAYS_BACK = 7; // far enough to reach the last close across a long weekend
 
+// The Mac's own resolver now and then says one of the feed's hosts does not
+// exist, for a minute or so at a time, while the DNS server answers for it as
+// usual: on 2026-10-23 symlookup.cnbc.com, the search box's lookup, failed
+// that way while quote.cnbc.com, on the same address, did not. Such a request
+// is made again with the host's address asked of the DNS server directly.
+const UNRESOLVED = new Set(['ENOTFOUND', 'EAI_AGAIN']);
+
 async function fetchJson(url, timeoutMs = 12_000) {
-  const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' }, signal: AbortSignal.timeout(timeoutMs) });
+  const headers = { 'User-Agent': USER_AGENT, Accept: 'application/json' };
+  let res;
+  try {
+    res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (err) {
+    if (!UNRESOLVED.has(err.cause?.code)) throw err;
+    return getJsonResolvedDirectly(url, headers, timeoutMs);
+  }
   if (!res.ok) throw new Error(`${new URL(url).hostname} responded ${res.status}`);
   return res.json();
+}
+
+// dns.lookup's answer, from the DNS server instead of the system resolver.
+function resolveDirectly(hostname, options, callback) {
+  dns.resolve4(hostname, (err, addresses) => {
+    if (err) callback(err);
+    else if (options.all) callback(null, addresses.map((address) => ({ address, family: 4 })));
+    else callback(null, addresses[0], 4);
+  });
+}
+
+function getJsonResolvedDirectly(url, headers, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers, lookup: resolveDirectly, signal: AbortSignal.timeout(timeoutMs) }, (res) => {
+      if (res.statusCode < 200 || res.statusCode > 299) {
+        res.resume();
+        reject(new Error(`${new URL(url).hostname} responded ${res.statusCode}`));
+        return;
+      }
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        } catch (err) {
+          reject(err);
+        }
+      });
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+  });
 }
 
 // Marks a result as missing some of its symbols and names them, without the
