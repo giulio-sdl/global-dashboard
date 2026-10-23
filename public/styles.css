@@ -575,6 +575,12 @@ td.c-pct .chip { padding-inline: 4px; font-size: 12px; }
   box-shadow: 0 0 0 1.5px var(--surface);
 }
 
+/* An index's bar sits under its level, smaller: its column holds the move since the close. */
+.lv { display: block; }
+td.c-last .range { height: 10px; margin: 2px 0 0 auto; }
+td.c-last .range::before { height: 4px; margin-top: -2px; }
+td.c-last .range i { width: 3px; height: 10px; margin: -5px 0 0 -1.5px; }
+
 /* ---- tooltip ---- */
 
 .tip {
