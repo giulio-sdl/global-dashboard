@@ -73,7 +73,8 @@ const AT_A_DATE = {
 // What valuing the company at a period's end takes besides the statements
 // (see valuation.js). EBITDA is operating income with depreciation and
 // amortization added back; for a company that files no operating income (an
-// oil major), the profit before tax with interest added back too.
+// oil major), the profit before tax with interest added back too, and nothing
+// where the interest is not filed either.
 const DEPRECIATION = {
   // Depreciation alone, last, for the few that file nothing broader (Alphabet).
   'us-gaap': ['DepreciationDepletionAndAmortization', 'DepreciationAmortizationAndAccretionNet', 'DepreciationAndAmortization', 'Depreciation'],
@@ -83,7 +84,7 @@ const PRETAX = {
   'us-gaap': ['IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest', 'IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments'],
   'ifrs-full': ['ProfitLossBeforeTax'],
 };
-const INTEREST = { 'us-gaap': ['InterestExpense', 'InterestExpenseNonoperating', 'InterestExpenseDebt'], 'ifrs-full': ['FinanceCosts'] };
+const INTEREST = { 'us-gaap': ['InterestExpense', 'InterestExpenseNonoperating', 'InterestAndDebtExpense', 'InterestExpenseDebt'], 'ifrs-full': ['FinanceCosts', 'InterestExpense'] };
 // All debt: long-term debt including the part due within a year (else its two
 // parts added up), and short-term borrowing besides. IFRS has one total for all of it.
 const DEBT = {
@@ -264,10 +265,12 @@ function valuationBasis(company, { standard, currency }, flows, balances, ends) 
   const ebitdaTo = (end) => {
     const addedBack = twelveMonths(depreciation, end);
     const operating = twelveMonths(flows.operatingIncome, end);
-    const beforeTax = twelveMonths(pretax, end);
     if (addedBack == null) return null;
     if (operating != null) return operating + addedBack;
-    return beforeTax == null ? null : beforeTax + (twelveMonths(interest, end) ?? 0) + addedBack;
+    // Without the interest, profit before tax would understate it: no figure, not one too low.
+    const beforeTax = twelveMonths(pretax, end);
+    const charged = twelveMonths(interest, end);
+    return beforeTax == null || charged == null ? null : beforeTax + charged + addedBack;
   };
   // Where a company does not tag its long-term debt (a bank, a conglomerate
   // that files it by business), the debt is not known: no figure, not none.
