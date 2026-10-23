@@ -208,7 +208,9 @@ quarter ends after the last fiscal year: flows over the last four quarters, the 
 - **Quarters by subtraction**: companies file cash flow only as a running total for the year, and never file
   a fourth quarter on its own. Those quarters are the running total less the one before.
 - **Once a quarter**: a company's statements are fetched when its panel is first opened, kept in `.cache/edgar`,
-  and fetched again when that copy is a quarter old, or weekly once the next report is overdue.
+  and fetched again when that copy is a quarter old, or weekly once the next report is overdue. `LAYOUT` in
+  `edgar.js` is raised whenever the figures are read or laid out differently; copies kept under an older one
+  are fetched again once.
 - **Contact address**: the SEC asks every program to name a contact and stay under ten requests a second.
   Put the address in `settings.local.json` next to `server.js`, as `{ "secContact": "you@example.com" }`, or in
   the `SEC_CONTACT` environment variable on a hosting service. The file is not in the repository. Without an
@@ -263,8 +265,9 @@ day with the figures to that day.
   (Berkshire Hathaway), the price alone carries it back.
 - **Enterprise value**: market cap plus debt (long-term debt with the part due within a year, and short-term
   borrowing) less cash and short-term investments, from the balance sheet on the day. Banks and some
-  conglomerates do not tag their debt as such (JPMorgan, Berkshire Hathaway), and have no enterprise value;
-  the panel's note says whether the debt or the cash is missing.
+  conglomerates do not tag their debt as such (JPMorgan, Goldman Sachs, Berkshire Hathaway), and Caterpillar
+  tags its quarters' debt only by business, so these have no enterprise value, or Caterpillar only at its
+  year ends; the panel's note says whether the debt or the cash is missing.
 - **Ratios**: trailing P/E is the price over the twelve months' diluted earnings per share, as on the P/E line;
   P/S and EV/revenue use the twelve months' revenue; P/B uses shareholders' equity on the day; EV/EBITDA uses
   operating income with depreciation and amortization added back over twelve months (or profit before tax
