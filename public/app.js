@@ -548,14 +548,16 @@ function renderTile(tile) {
   const item = tile.item;
   const value = $('.t-value', tile);
   flashOnChange(value, q.last);
-  value.textContent = fmt(q.last, q.dp);
+  value.textContent = item.yield ? `${fmt(q.last, YIELD_DP)}%` : fmt(q.last, q.dp);
   const { periods } = MODES[state.mode];
   const moves = changesFor(item, q, periods);
   [...$('.t-moves', tile).children].forEach((slot, i) => {
     slot.firstChild.textContent = PERIOD_SHORT[periods[i]];
     setChange(slot.lastChild, moves[i], item.yield);
   });
-  renderRevs($('.revs', tile), moves[0]);
+  // The lights are scaled in percent. A yield's move is in basis points, so
+  // its lights go by how far the yield itself moved, in percent of it.
+  renderRevs($('.revs', tile), item.yield ? changeOver(periods[0], q, state.bases[periods[0]]?.[item.symbol], false) : moves[0]);
   const after = afterView(item, q);
   const moved = signed(after?.pct, 2, '%');
   $('.t-after', tile).replaceChildren(...(after ? ['Since close ', el('b', { class: moved.dir, text: moved.text })] : []));

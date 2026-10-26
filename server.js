@@ -289,6 +289,7 @@ function normalizeQuote(raw, withStats = false) {
   const last = num(raw.last);
   if (raw.code !== 0 || last == null) return null;
   const dp = decimals(raw.last, last);
+  const date = (raw.last_time || '').slice(0, 10) || null;
   // Pre-market or after-hours trading. Its change is measured from the price
   // the regular session left off at, so while that is still the price quoted
   // it is current; once the regular session trades again it is not (the feed
@@ -296,7 +297,12 @@ function normalizeQuote(raw, withStats = false) {
   const ext = raw.ExtendedMktQuote;
   const extLast = ext ? num(ext.last) : null;
   const extended = extLast == null ? null : change(extLast, ext.change, ext.change_pct);
-  const current = extended && Math.abs(extended.prevClose - last) <= 0.5 * 10 ** -places(ext.last) + 0.5 * 10 ** -dp + 1e-9;
+  // The feed also goes on giving an evening's after-hours trade through the
+  // next day's session, its change worked out afresh from the new price, so
+  // it passes the test above (LQD on a Monday, with Friday's): a trade from an
+  // earlier day than the regular session's latest is not current either.
+  const earlier = Boolean(date && ext?.last_time && ext.last_time.slice(0, 10) < date);
+  const current = extended && !earlier && Math.abs(extended.prevClose - last) <= 0.5 * 10 ** -places(ext.last) + 0.5 * 10 ** -dp + 1e-9;
   return {
     last,
     ...change(last, raw.change, raw.change_pct),
@@ -307,7 +313,7 @@ function normalizeQuote(raw, withStats = false) {
     yrLow: positive(raw.yrloprice),
     currency: raw.currencyCode || null,
     time: raw.last_timedate || null,
-    date: (raw.last_time || '').slice(0, 10) || null,
+    date,
     realTime: raw.realTime === 'true',
     session: raw.curmktstatus || null,
     contract: /\(([A-Z][a-z]{2})'(\d{2})\)/.exec(raw.name || '')?.slice(1, 3).join(" '") || null,
@@ -433,10 +439,13 @@ async function loadQuotes() {
       Object.assign(q, yearRange(q, history[symbol]));
     }
   }
-  // For an index whose exchange has closed, the move since then.
+  // For an index whose exchange has closed, the move since then: since the
+  // close of the session its quote belongs to. Ahead of the open the feed
+  // dates the quote today, and today's close is still to come.
   const proxyBars = await soon(getProxyBars);
   for (const { symbol, market, proxy } of proxyBars ? PROXIED : []) {
-    if (quotes[symbol]) quotes[symbol].after = sinceClose(quotes[symbol], MARKETS[market], quotes[proxy], proxyBars[proxy]);
+    const q = quotes[symbol];
+    if (q) q.after = sinceClose({ ...q, date: q.date && sessionOf(q, history?.[symbol]).date }, MARKETS[market], quotes[proxy], proxyBars[proxy]);
   }
   return quotes;
 }
@@ -1379,7 +1388,8 @@ function readJson(req, limit = 4096) {
       else chunks.push(chunk);
     });
     req.on('end', () => {
-      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch { reject(new Refusal('That request is not JSON.')); }
+      // A body of `null` is JSON too, and changes nothing.
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') ?? {}); } catch { reject(new Refusal('That request is not JSON.')); }
     });
     req.on('error', reject);
   });
@@ -1493,7 +1503,17 @@ async function sendStatic(res, pathname) {
 
 http
   .createServer((req, res) => {
-    const { pathname, searchParams } = new URL(req.url, 'http://localhost');
+    // An address that cannot be read (a stray "%" in it, say) is turned away:
+    // left to throw, it would stop the server.
+    let url;
+    let file;
+    try {
+      url = new URL(req.url, 'http://localhost');
+      file = decodeURIComponent(url.pathname);
+    } catch {
+      return sendJson(res, 400, { error: 'That address cannot be read.' });
+    }
+    const { pathname, searchParams } = url;
     if (pathname === '/api/config') return sendJson(res, 200, configFor(req));
     // Each refresh says which layout it belongs to, so a page open while the
     // layout was changed elsewhere (the Mac app and a browser) catches up.
@@ -1505,7 +1525,7 @@ http
     if (pathname === '/api/bases') return sendData(res, 'bases', loadBases);
     if (pathname === '/api/sparks') return sendData(res, 'sparks', () => getSparks(searchParams.get('range')));
     if (pathname === '/api/search') return sendData(res, 'results', () => search(searchParams.get('q')));
-    return sendStatic(res, decodeURIComponent(pathname));
+    return sendStatic(res, file);
   })
   .listen(PORT, HOST, () => {
     console.log(`Global Dashboard running at http://${HOST === '127.0.0.1' ? 'localhost' : HOST}:${PORT}`);
