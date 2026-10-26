@@ -11,6 +11,7 @@ import { loadFredSeries, weekly as weeklyBars } from './fred.js';
 import { loadHoldings } from './holdings.js';
 import { MARKETS } from './instruments.js';
 import { openLayout, Refusal } from './layout.js';
+import { nameMatch, nameParts, typedName } from './names.js';
 import { betweenDailyCloses, HOUR_BAR_MS, MINUTE_BAR_MS, momentBefore, priceAt, rangeSince } from './rolling.js';
 import { sinceClose } from './sinceclose.js';
 import { valuationMeasures } from './valuation.js';
@@ -30,7 +31,7 @@ const SETTINGS = await readFile(path.join(ROOT, 'settings.local.json'), 'utf8').
   if (err.code !== 'ENOENT') console.error(`settings.local.json was not read: ${err.message}`);
   return {};
 });
-const edgarFinancials = createEdgar({ contact: process.env.SEC_CONTACT || SETTINGS.secContact, cacheDir: path.join(ROOT, '.cache', 'edgar') });
+const edgar = createEdgar({ contact: process.env.SEC_CONTACT || SETTINGS.secContact, cacheDir: path.join(ROOT, '.cache', 'edgar') });
 
 const QUOTE_URL = 'https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol';
 const BARS_URL = 'https://ts-api.cnbc.com/harmony/app/bars';
@@ -557,23 +558,154 @@ async function constituent(indexSymbol, symbol) {
 async function getCompany(indexSymbol, symbol) {
   if (!indexSymbol) return getShare(symbol);
   const { item, priced, holding, quote } = await constituent(indexSymbol, symbol);
-  const filings = await edgarFinancials({ ticker: holding.ticker, names: [quote.fullName, holding.name].filter(Boolean), us: !/-[A-Z]{2}$/.test(symbol) });
+  const filings = await edgar.financials({ ticker: holding.ticker, names: [quote.fullName, holding.name].filter(Boolean), us: !/-[A-Z]{2}$/.test(symbol) });
   const company = { symbol, ticker: holding.ticker, name: quote.fullName || holding.name, sector: holding.sector, weight: holding.weight, index: item.name, quote, ...await withEarnings(symbol, quote, filings) };
   return { value: company, at: priced.at, error: priced.error };
 }
 
-// ---- any share, found by its symbol -------------------------------------------
+// ---- any share, found by its symbol or its company's name ---------------------
 
-// The search box offers what the feed's own symbol lookup finds: instruments
-// whose symbol or name starts with the text typed, in the order it ranks them.
-// A company listed in several countries comes once, under the first country
-// the lookup lists it in (its home market, in practice), unless another
-// listing's symbol is typed exactly; share classes in one country (BRK.A and
-// BRK.B) all come. Answers are kept ten minutes.
+// The search box takes a symbol or a company's name. It offers, best first:
+// the symbol typed, where there is one; companies whose name is the one typed,
+// or begins with the words typed; then the rest of what the feed's own symbol
+// lookup finds (instruments whose symbol or name starts with the text, in the
+// order it ranks them), preferred shares last.
+//
+// The lookup alone misses many names. It matches the text letter for letter,
+// so "coca cola" finds a bottler in Hokkaido and not Coca-Cola, and it gives
+// twenty answers in nearly alphabetical order, so "goldman" fills up with
+// Goldman Sachs funds before it reaches the bank. Names are therefore also
+// looked up, as names.js compares them, among the companies the dashboard
+// knows: its indexes' constituents, under the listing their index panel uses,
+// and the SEC's registrants, under their US ticker and by their whole name
+// only (there are ten thousand of them). Companies that answer alike are
+// ranked by market value.
+//
+// A company listed in several countries comes once: under its index's listing
+// when it is a constituent (UniCredit in Milan, not Frankfurt), else under the
+// first country the lookup lists it in, passing over one where it trades only
+// in Frankfurt or over the counter (Tencent in Hong Kong). Another listing
+// comes when its symbol is typed exactly; share classes in one country (BRK.A
+// and BRK.B) all come. Answers are kept ten minutes.
 const SEARCH_TTL_MS = 10 * 60_000;
 const SEARCH_KEPT = 200;
 const SEARCH_SHOWN = 10;
+const NAMED_TRIED = 8; // companies found by name whose quotes are asked for
+const NAMED_SHOWN = 5;
+const NAMES_PATIENCE_MS = 1_500; // a list of names still loading is waited for this long
+const SECONDARY_VENUE = /frankfurt|over the counter|^otc/i;
+const PREFERRED = new Set(['PR', 'CP']);
 const searches = new Map(); // what was typed → { at, results }, oldest first
+
+// The market a symbol trades in, from its suffix: UCG-IT is Milan's, CRIN-FF
+// Frankfurt's, and one without a suffix is American.
+const marketOf = (symbol) => /-([A-Z]{2})$/.exec(symbol)?.[1] ?? 'US';
+
+// Dollars per unit of a currency, for comparing market values. Most pairs are
+// quoted in units per dollar (USD/JPY), these in dollars per unit (EUR/USD).
+const PER_UNIT_PAIRS = new Set(['EUR', 'GBP', 'AUD', 'NZD']);
+const RATE_TTL_MS = 3600_000;
+const dollarsPerUnit = keyed(RATE_TTL_MS, async (code) => {
+  const rate = (await fetchQuotes([`${code}=`]))[`${code}=`]?.last;
+  if (!rate) throw new Error(`the quote feed has no rate for ${code}`);
+  return PER_UNIT_PAIRS.has(code) ? rate : 1 / rate;
+});
+
+async function inDollars(amount, currency) {
+  if (amount == null || !currency) return null;
+  const code = currency === 'GBp' ? 'GBP' : currency; // London prices are in pence, its values in pounds
+  if (code === 'USD') return amount;
+  return dollarsPerUnit(code, code).then(({ value }) => amount * value, () => null);
+}
+
+// Every company the dashboard can find by name, its name taken apart once:
+// made again when one of the lists changes.
+let names = { lists: [], constituents: [], registrants: [] };
+
+async function namesKnown() {
+  const lists = await Promise.all([
+    ...[...INDEX_ITEMS.values()].map((item) => soon(() => holdingsOf(item.symbol, item), NAMES_PATIENCE_MS)),
+    soon(async () => ({ value: await edgar.registered() }), NAMES_PATIENCE_MS),
+  ]);
+  if (lists.length === names.lists.length && lists.every((list, i) => list === names.lists[i])) return names;
+  const holdings = lists.slice(0, -1).filter(Boolean);
+  names = {
+    lists,
+    constituents: holdings.flatMap((list) => list.items)
+      .filter((holding) => holding.symbols.length)
+      .map((holding) => ({ symbols: holding.symbols, name: holding.name, weight: holding.weight, parts: nameParts(holding.name) })),
+    registrants: (lists.at(-1) ?? []).map((registrant) => ({ symbols: [registrant.ticker.replaceAll('-', '.')], name: registrant.title, parts: nameParts(registrant.title) })),
+  };
+  return names;
+}
+
+// The companies whose name answers what was typed (see names.js): a
+// constituent by its name or the words it begins with, a registrant by its
+// whole name. Each comes once, under its listings in the market where it
+// weighs most in the dashboard's indexes. Whole names first.
+function companiesNamed(typed, { constituents, registrants }) {
+  const byName = new Map(); // a name that answers → the constituents' listings under it
+  for (const company of constituents) {
+    const match = nameMatch(company.parts, typed);
+    if (!match) continue;
+    if (!byName.has(company.parts.core)) byName.set(company.parts.core, []);
+    byName.get(company.parts.core).push({ ...company, match });
+  }
+  const listed = [];
+  for (const listings of byName.values()) {
+    const market = marketOf(listings.reduce((a, b) => (b.weight > a.weight ? b : a)).symbols[0]);
+    for (const listing of listings) {
+      if (marketOf(listing.symbols[0]) !== market) continue;
+      // One listing in several indexes (the S&P 500 and the Nasdaq 100) comes once.
+      const same = listed.find((other) => other.symbols[0] === listing.symbols[0]);
+      if (same) same.weight = Math.max(same.weight, listing.weight);
+      else listed.push(listing);
+    }
+  }
+  listed.sort((a, b) => b.weight - a.weight);
+  const registered = [];
+  for (const company of registrants) {
+    if (registered.length === NAMED_TRIED) break;
+    if (nameMatch(company.parts, typed) !== 'name' || byName.has(company.parts.core)) continue;
+    byName.set(company.parts.core, []);
+    registered.push({ ...company, match: 'name' });
+  }
+  const whole = listed.filter((company) => company.match === 'name');
+  return [...whole, ...registered, ...listed.filter((company) => company.match !== 'name')].slice(0, NAMED_TRIED);
+}
+
+// The companies found by name, as offered: each under the first of its
+// symbols the feed prices, with the feed's name for it, and the larger
+// companies first among those that answer alike.
+async function offeredByName(typed) {
+  const companies = companiesNamed(typed, await namesKnown());
+  if (!companies.length) return [];
+  const quotes = await fetchQuotes([...new Set(companies.flatMap((company) => company.symbols))], true).catch(() => ({}));
+  const offered = await Promise.all(companies.map(async (company) => {
+    const symbol = company.symbols.find((s) => quotes[s]);
+    if (!symbol) return null;
+    const quote = quotes[symbol];
+    return {
+      symbol,
+      forms: company.symbols,
+      name: quote.fullName || company.name,
+      type: 'STOCK',
+      exchange: quote.stats?.exchange ?? null,
+      match: company.match,
+      market: marketOf(symbol),
+      names: new Set([company.parts.core, nameParts(quote.fullName ?? '').core]),
+      value: await inDollars(quote.stats?.marketCap, quote.currency),
+    };
+  }));
+  return offered.filter(Boolean)
+    .sort((a, b) => (a.match !== b.match ? (a.match === 'name' ? -1 : 1) : (b.value ?? -1) - (a.value ?? -1)))
+    .slice(0, NAMED_SHOWN);
+}
+
+async function lookUp(query) {
+  const params = new URLSearchParams({ prefix: query, partnerid: '20064', pgok: '1', pgsize: '20' });
+  return [].concat((await fetchJson(`${LOOKUP_URL}?${params}`, QUOTE_TIMEOUT_MS)) ?? []).filter((entry) => entry?.symbolName);
+}
 
 async function search(text) {
   const query = String(text ?? '').trim().slice(0, 40);
@@ -581,20 +713,58 @@ async function search(text) {
   if (!key) return { value: [], at: Date.now(), error: null };
   const kept = searches.get(key);
   if (kept && Date.now() - kept.at < SEARCH_TTL_MS) return { value: kept.results, at: kept.at, error: null };
-  const params = new URLSearchParams({ prefix: query, partnerid: '20064', pgok: '1', pgsize: '20' });
-  const found = [].concat((await fetchJson(`${LOOKUP_URL}?${params}`, QUOTE_TIMEOUT_MS)) ?? []).filter((entry) => entry?.symbolName);
-  const home = new Map(); // issuer → the country it was first listed under
-  const results = [];
+  const asName = typedName(query);
+  const typed = asName.length >= 2 ? asName : null; // a name is two letters at least
+  const [lookup, named] = await Promise.all([
+    lookUp(query).then((found) => ({ found }), (err) => ({ found: [], err })),
+    typed ? offeredByName(typed) : [],
+  ]);
+  if (lookup.err && !named.length) throw lookup.err;
+  const { found } = lookup;
+
+  // Where the lookup would have each company it lists.
+  const home = new Map(); // issuer → { country, secondary }
   for (const entry of found) {
     const issuer = entry.issuerId ?? entry.symbolName;
-    const exact = entry.symbolName.toLowerCase() === key;
-    if (home.has(issuer) && home.get(issuer) !== entry.countryCode && !exact) continue;
-    if (!home.has(issuer)) home.set(issuer, entry.countryCode);
-    results.push({ symbol: entry.symbolName, name: entry.companyName || entry.symbolName, type: entry.issueType || null, exchange: entry.exchangeName || null, exact });
+    const secondary = SECONDARY_VENUE.test(entry.exchangeName ?? '');
+    if (!home.has(issuer) || (home.get(issuer).secondary && !secondary)) home.set(issuer, { country: entry.countryCode, secondary });
   }
-  // The symbol typed, where there is one, leads.
-  results.sort((a, b) => b.exact - a.exact);
-  const shown = results.slice(0, SEARCH_SHOWN).map(({ exact, ...result }) => result);
+  // A company found by name is at home where its listing is, and the lookup's
+  // listings of it elsewhere are left out: those of its issuer, when the
+  // lookup says who issued its listing, else those under its name. The
+  // lookup may write the listing's symbol another way (NES.N-CH for NESN-CH).
+  const namedAs = new Map(); // a way of writing a named company's symbol → the symbol
+  const namedIssuers = new Map(); // issuer → market
+  const namedNames = new Map(); // name → market
+  for (const company of named) {
+    for (const form of company.forms) namedAs.set(form, company.symbol);
+    const entry = found.find((candidate) => company.forms.includes(candidate.symbolName));
+    if (entry?.issuerId != null) namedIssuers.set(entry.issuerId, company.market);
+    else for (const name of company.names) namedNames.set(name, company.market);
+  }
+
+  const offered = new Map(named.map(({ symbol, name, type, exchange, match }) => [symbol, { symbol, name, type, exchange, rank: match === 'name' ? 1 : 2 }]));
+  for (const entry of found) {
+    const issuer = entry.issuerId ?? entry.symbolName;
+    const parts = nameParts(entry.companyName ?? '');
+    const market = marketOf(entry.symbolName);
+    const exact = entry.symbolName.toLowerCase() === key;
+    const atHome = namedIssuers.has(issuer) ? namedIssuers.get(issuer) === market
+      : namedNames.has(parts.core) ? namedNames.get(parts.core) === market
+      : home.get(issuer).country === entry.countryCode;
+    if (!atHome && !exact) continue;
+    const rank = exact ? 0 : nameMatch(parts, typed) === 'name' ? 1 : PREFERRED.has(entry.issueType) ? 4 : 3;
+    const known = offered.get(namedAs.get(entry.symbolName) ?? entry.symbolName);
+    if (known) {
+      known.rank = Math.min(known.rank, rank);
+      known.type = entry.issueType || known.type;
+    } else {
+      offered.set(entry.symbolName, { symbol: entry.symbolName, name: entry.companyName || entry.symbolName, type: entry.issueType || null, exchange: entry.exchangeName || null, rank });
+    }
+  }
+  const shown = [...offered.values()].sort((a, b) => a.rank - b.rank).slice(0, SEARCH_SHOWN).map(({ rank, ...result }) => result);
+  // Without the lookup, what was found by name is offered but not kept.
+  if (lookup.err) return { value: shown, at: Date.now(), error: lookup.err.message };
   searches.delete(key);
   searches.set(key, { at: Date.now(), results: shown });
   if (searches.size > SEARCH_KEPT) searches.delete(searches.keys().next().value);
@@ -619,7 +789,7 @@ async function quoteOfShare(symbol) {
 async function getShare(symbol) {
   const priced = await quoteOfShare(symbol);
   const quote = priced.value;
-  const filings = await edgarFinancials({ ticker: symbol, names: [quote.fullName].filter(Boolean), us: !/-[A-Z]{2}$/.test(symbol) });
+  const filings = await edgar.financials({ ticker: symbol, names: [quote.fullName].filter(Boolean), us: !/-[A-Z]{2}$/.test(symbol) });
   const share = { symbol, ticker: symbol, name: quote.fullName || symbol, quote, ...await withEarnings(symbol, quote, filings) };
   return { value: share, at: priced.at, error: priced.error };
 }
