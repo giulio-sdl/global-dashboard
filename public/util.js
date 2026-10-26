@@ -29,6 +29,15 @@ export async function getJson(url, signal) {
   return body;
 }
 
+// Sends a change to the server. Sent as JSON, which is also what the server
+// checks to know the request came from this page.
+export async function postJson(url, payload) {
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  return body;
+}
+
 // ---- formatting -------------------------------------------------------------
 
 const formatters = new Map();

@@ -19,6 +19,13 @@
       <h1><span>Global Markets</span></h1>
       <div class="flag" aria-hidden="true"></div>
     </div>
+    <!-- Any share, fund or index by symbol or name: it opens in the company panel. -->
+    <div class="search" role="search">
+      <label class="sr-only" for="search">Search by symbol or name</label>
+      <input id="search" type="search" placeholder="Search a ticker or company" autocomplete="off" spellcheck="false"
+        role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="search-results" enterkeyhint="go">
+      <ul id="search-results" class="search-results" role="listbox" aria-label="Matches" hidden></ul>
+    </div>
     <div class="controls">
       <span id="updated" class="updated" role="status" data-state="loading"><i class="live"></i><span>Loading…</span></span>
       <label class="control">
@@ -32,6 +39,8 @@
       </label>
       <button id="refresh" type="button" class="control">Refresh now</button>
       <button id="theme" type="button" class="control">Theme: auto</button>
+      <button id="reset" type="button" class="control" hidden>Restore defaults</button>
+      <button id="edit" type="button" class="control" aria-pressed="false" hidden>Edit rows</button>
     </div>
   </header>
 
@@ -56,6 +65,7 @@
   <main id="main">
     <section id="overview">
       <h2>At a glance</h2>
+      <p class="edit-hint">Rows marked ★ show here as tiles. Click a row's ★ to add or remove its tile; new tiles go at the end.</p>
       <div id="tiles" class="tiles"></div>
     </section>
   </main>
@@ -63,6 +73,8 @@
   <footer class="notes">
     <p>
       Click any row or tile for its chart and key figures; indexes also show the constituents that moved them, where weights are available.
+      The search box at the top (or "/") opens any share, fund or index by its symbol or name; a company's chart shows its P/E
+      from six months up, worked out from the earnings it files with the SEC.
       Cash indexes do not trade outside their session. While an exchange is shut, "Since close" shows how far a
       future or US-listed ETF on the same market has moved since the closing bell, as a guide to where the index
       would stand now. ETFs are priced in US dollars, so that figure includes currency moves, and it stays empty
@@ -133,6 +145,7 @@
   </dialog>
 
   <div id="tip" class="tip" hidden></div>
+  <div id="toast" class="toast" role="status" hidden><span></span><button type="button" class="control" hidden></button></div>
   <script type="module" src="app.js"></script>
 </body>
 </html>
