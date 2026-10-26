@@ -1,4 +1,4 @@
-// Small helpers shared by the dashboard and the index detail panel.
+// Small helpers shared by the dashboard and its panels.
 
 export const $ = (sel, root = document) => root.querySelector(sel);
 
@@ -70,4 +70,24 @@ export function timeLabel(text) {
   const date = /^(\d{2})\/(\d{2})\/\d{2}/.exec(text);
   if (date) return `${Number(date[2])} ${MONTHS[Number(date[1]) - 1]} close`;
   return text;
+}
+
+const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
+const EXTENDED = { PRE: 'Pre-market', POST: 'After-hours' };
+
+// Pre-market or after-hours trading, under the session's price in a panel's
+// heading: the price, its change from where the session left off, and the
+// time and volume. Hidden when there is none (see normalizeQuote in server.js).
+export function renderExtended(line, q) {
+  const ext = q?.ext;
+  line.hidden = !ext;
+  if (!ext) return;
+  const pct = signed(ext.changePct, 2, '%');
+  line.replaceChildren(
+    el('span', { class: 'dot' }),
+    el('b', { text: EXTENDED[ext.type?.split('_')[0]] ?? 'Extended hours' }),
+    el('span', { class: 'dx-last', text: fmt(ext.last, q.dp) }),
+    el('span', { class: `dx-chg ${pct.dir}`, text: `${signed(ext.change, q.dp).text} (${pct.text})` }),
+    el('span', { class: 'dq-time', text: [timeLabel(ext.time), ext.volume != null && `volume ${compact.format(ext.volume)}`].filter(Boolean).join(' · ') }),
+  );
 }
