@@ -1,13 +1,16 @@
 // Zero-dependency server: serves the dashboard and proxies market data so the
 // browser never talks to the data provider directly.
 import http from 'node:http';
+import https from 'node:https';
+import dns from 'node:dns';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createEdgar } from './edgar.js';
+import { createEdgar, trailingEarnings } from './edgar.js';
 import { loadFredSeries, weekly as weeklyBars } from './fred.js';
 import { loadHoldings } from './holdings.js';
 import { MARKETS, OVERVIEW, SECTIONS } from './instruments.js';
+import { nameMatch, nameParts, typedName } from './names.js';
 import { betweenDailyCloses, HOUR_BAR_MS, MINUTE_BAR_MS, momentBefore, priceAt, rangeSince } from './rolling.js';
 import { sinceClose } from './sinceclose.js';
 
@@ -26,10 +29,11 @@ const SETTINGS = await readFile(path.join(ROOT, 'settings.local.json'), 'utf8').
   if (err.code !== 'ENOENT') console.error(`settings.local.json was not read: ${err.message}`);
   return {};
 });
-const edgarFinancials = createEdgar({ contact: process.env.SEC_CONTACT || SETTINGS.secContact, cacheDir: path.join(ROOT, '.cache', 'edgar') });
+const edgar = createEdgar({ contact: process.env.SEC_CONTACT || SETTINGS.secContact, cacheDir: path.join(ROOT, '.cache', 'edgar') });
 
 const QUOTE_URL = 'https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol';
 const BARS_URL = 'https://ts-api.cnbc.com/harmony/app/bars';
+const LOOKUP_URL = 'https://symlookup.cnbc.com/symservice/symlookup.do';
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
 const QUOTE_TTL_MS = 10_000;
@@ -66,10 +70,56 @@ const PROXIED = SECTIONS.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap(
 const PROXY_SYMBOLS = [...new Set(PROXIED.map((p) => p.proxy))];
 const PROXY_DAYS_BACK = 7; // far enough to reach the last close across a long weekend
 
+// The Mac's own resolver now and then says one of the feed's hosts does not
+// exist, for a minute or so at a time, while the DNS server answers for it as
+// usual: on 2026-10-23 symlookup.cnbc.com, the search box's lookup, failed
+// that way while quote.cnbc.com, on the same address, did not. Such a request
+// is made again with the host's address asked of the DNS server directly.
+const UNRESOLVED = new Set(['ENOTFOUND', 'EAI_AGAIN']);
+
 async function fetchJson(url, timeoutMs = 12_000) {
-  const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' }, signal: AbortSignal.timeout(timeoutMs) });
+  const headers = { 'User-Agent': USER_AGENT, Accept: 'application/json' };
+  let res;
+  try {
+    res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (err) {
+    if (!UNRESOLVED.has(err.cause?.code)) throw err;
+    return getJsonResolvedDirectly(url, headers, timeoutMs);
+  }
   if (!res.ok) throw new Error(`${new URL(url).hostname} responded ${res.status}`);
   return res.json();
+}
+
+// dns.lookup's answer, from the DNS server instead of the system resolver.
+function resolveDirectly(hostname, options, callback) {
+  dns.resolve4(hostname, (err, addresses) => {
+    if (err) callback(err);
+    else if (options.all) callback(null, addresses.map((address) => ({ address, family: 4 })));
+    else callback(null, addresses[0], 4);
+  });
+}
+
+function getJsonResolvedDirectly(url, headers, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers, lookup: resolveDirectly, signal: AbortSignal.timeout(timeoutMs) }, (res) => {
+      if (res.statusCode < 200 || res.statusCode > 299) {
+        res.resume();
+        reject(new Error(`${new URL(url).hostname} responded ${res.statusCode}`));
+        return;
+      }
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        } catch (err) {
+          reject(err);
+        }
+      });
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+  });
 }
 
 // Marks a result as missing some of its symbols and names them, without the
@@ -474,11 +524,244 @@ async function constituent(indexSymbol, symbol) {
   return { item, priced, ...row };
 }
 
+// Without an index it is any share, found from the search box.
 async function getCompany(indexSymbol, symbol) {
+  if (!indexSymbol) return getShare(symbol);
   const { item, priced, holding, quote } = await constituent(indexSymbol, symbol);
-  const filings = await edgarFinancials({ ticker: holding.ticker, names: [quote.fullName, holding.name].filter(Boolean), us: !/-[A-Z]{2}$/.test(symbol) });
-  const company = { symbol, ticker: holding.ticker, name: quote.fullName || holding.name, sector: holding.sector, weight: holding.weight, index: item.name, quote, filings };
+  const filings = await edgar.financials({ ticker: holding.ticker, names: [quote.fullName, holding.name].filter(Boolean), us: !/-[A-Z]{2}$/.test(symbol) });
+  const company = { symbol, ticker: holding.ticker, name: quote.fullName || holding.name, sector: holding.sector, weight: holding.weight, index: item.name, quote, ...await withEarnings(symbol, quote, filings) };
   return { value: company, at: priced.at, error: priced.error };
+}
+
+// ---- any share, found by its symbol or its company's name ---------------------
+
+// The search box takes a symbol or a company's name. It offers, best first:
+// the symbol typed, where there is one; companies whose name is the one typed,
+// or begins with the words typed; then the rest of what the feed's own symbol
+// lookup finds (instruments whose symbol or name starts with the text, in the
+// order it ranks them), preferred shares last.
+//
+// The lookup alone misses many names. It matches the text letter for letter,
+// so "coca cola" finds a bottler in Hokkaido and not Coca-Cola, and it gives
+// twenty answers in nearly alphabetical order, so "goldman" fills up with
+// Goldman Sachs funds before it reaches the bank. Names are therefore also
+// looked up, as names.js compares them, among the companies the dashboard
+// knows: its indexes' constituents, under the listing their index panel uses,
+// and the SEC's registrants, under their US ticker and by their whole name
+// only (there are ten thousand of them). Companies that answer alike are
+// ranked by market value.
+//
+// A company listed in several countries comes once: under its index's listing
+// when it is a constituent (UniCredit in Milan, not Frankfurt), else under the
+// first country the lookup lists it in, passing over one where it trades only
+// in Frankfurt or over the counter (Tencent in Hong Kong). Another listing
+// comes when its symbol is typed exactly; share classes in one country (BRK.A
+// and BRK.B) all come. Answers are kept ten minutes.
+const SEARCH_TTL_MS = 10 * 60_000;
+const SEARCH_KEPT = 200;
+const SEARCH_SHOWN = 10;
+const NAMED_TRIED = 8; // companies found by name whose quotes are asked for
+const NAMED_SHOWN = 5;
+const NAMES_PATIENCE_MS = 1_500; // a list of names still loading is waited for this long
+const SECONDARY_VENUE = /frankfurt|over the counter|^otc/i;
+const PREFERRED = new Set(['PR', 'CP']);
+const searches = new Map(); // what was typed → { at, results }, oldest first
+
+// The market a symbol trades in, from its suffix: UCG-IT is Milan's, CRIN-FF
+// Frankfurt's, and one without a suffix is American.
+const marketOf = (symbol) => /-([A-Z]{2})$/.exec(symbol)?.[1] ?? 'US';
+
+// Dollars per unit of a currency, for comparing market values. Most pairs are
+// quoted in units per dollar (USD/JPY), these in dollars per unit (EUR/USD).
+const PER_UNIT_PAIRS = new Set(['EUR', 'GBP', 'AUD', 'NZD']);
+const RATE_TTL_MS = 3600_000;
+const dollarsPerUnit = keyed(RATE_TTL_MS, async (code) => {
+  const rate = (await fetchQuotes([`${code}=`]))[`${code}=`]?.last;
+  if (!rate) throw new Error(`the quote feed has no rate for ${code}`);
+  return PER_UNIT_PAIRS.has(code) ? rate : 1 / rate;
+});
+
+async function inDollars(amount, currency) {
+  if (amount == null || !currency) return null;
+  const code = currency === 'GBp' ? 'GBP' : currency; // London prices are in pence, its values in pounds
+  if (code === 'USD') return amount;
+  return dollarsPerUnit(code, code).then(({ value }) => amount * value, () => null);
+}
+
+// Every company the dashboard can find by name, its name taken apart once:
+// made again when one of the lists changes.
+let names = { lists: [], constituents: [], registrants: [] };
+
+async function namesKnown() {
+  const lists = await Promise.all([
+    ...[...INDEX_ITEMS.values()].map((item) => soon(() => holdingsOf(item.symbol, item), NAMES_PATIENCE_MS)),
+    soon(async () => ({ value: await edgar.registered() }), NAMES_PATIENCE_MS),
+  ]);
+  if (lists.length === names.lists.length && lists.every((list, i) => list === names.lists[i])) return names;
+  const holdings = lists.slice(0, -1).filter(Boolean);
+  names = {
+    lists,
+    constituents: holdings.flatMap((list) => list.items)
+      .filter((holding) => holding.symbols.length)
+      .map((holding) => ({ symbols: holding.symbols, name: holding.name, weight: holding.weight, parts: nameParts(holding.name) })),
+    registrants: (lists.at(-1) ?? []).map((registrant) => ({ symbols: [registrant.ticker.replaceAll('-', '.')], name: registrant.title, parts: nameParts(registrant.title) })),
+  };
+  return names;
+}
+
+// The companies whose name answers what was typed (see names.js): a
+// constituent by its name or the words it begins with, a registrant by its
+// whole name. Each comes once, under its listings in the market where it
+// weighs most in the dashboard's indexes. Whole names first.
+function companiesNamed(typed, { constituents, registrants }) {
+  const byName = new Map(); // a name that answers → the constituents' listings under it
+  for (const company of constituents) {
+    const match = nameMatch(company.parts, typed);
+    if (!match) continue;
+    if (!byName.has(company.parts.core)) byName.set(company.parts.core, []);
+    byName.get(company.parts.core).push({ ...company, match });
+  }
+  const listed = [];
+  for (const listings of byName.values()) {
+    const market = marketOf(listings.reduce((a, b) => (b.weight > a.weight ? b : a)).symbols[0]);
+    for (const listing of listings) {
+      if (marketOf(listing.symbols[0]) !== market) continue;
+      // One listing in several indexes (the S&P 500 and the Nasdaq 100) comes once.
+      const same = listed.find((other) => other.symbols[0] === listing.symbols[0]);
+      if (same) same.weight = Math.max(same.weight, listing.weight);
+      else listed.push(listing);
+    }
+  }
+  listed.sort((a, b) => b.weight - a.weight);
+  const registered = [];
+  for (const company of registrants) {
+    if (registered.length === NAMED_TRIED) break;
+    if (nameMatch(company.parts, typed) !== 'name' || byName.has(company.parts.core)) continue;
+    byName.set(company.parts.core, []);
+    registered.push({ ...company, match: 'name' });
+  }
+  const whole = listed.filter((company) => company.match === 'name');
+  return [...whole, ...registered, ...listed.filter((company) => company.match !== 'name')].slice(0, NAMED_TRIED);
+}
+
+// The companies found by name, as offered: each under the first of its
+// symbols the feed prices, with the feed's name for it, and the larger
+// companies first among those that answer alike.
+async function offeredByName(typed) {
+  const companies = companiesNamed(typed, await namesKnown());
+  if (!companies.length) return [];
+  const quotes = await fetchQuotes([...new Set(companies.flatMap((company) => company.symbols))], true).catch(() => ({}));
+  const offered = await Promise.all(companies.map(async (company) => {
+    const symbol = company.symbols.find((s) => quotes[s]);
+    if (!symbol) return null;
+    const quote = quotes[symbol];
+    return {
+      symbol,
+      forms: company.symbols,
+      name: quote.fullName || company.name,
+      type: 'STOCK',
+      exchange: quote.stats?.exchange ?? null,
+      match: company.match,
+      market: marketOf(symbol),
+      names: new Set([company.parts.core, nameParts(quote.fullName ?? '').core]),
+      value: await inDollars(quote.stats?.marketCap, quote.currency),
+    };
+  }));
+  return offered.filter(Boolean)
+    .sort((a, b) => (a.match !== b.match ? (a.match === 'name' ? -1 : 1) : (b.value ?? -1) - (a.value ?? -1)))
+    .slice(0, NAMED_SHOWN);
+}
+
+async function lookUp(query) {
+  const params = new URLSearchParams({ prefix: query, partnerid: '20064', pgok: '1', pgsize: '20' });
+  return [].concat((await fetchJson(`${LOOKUP_URL}?${params}`, QUOTE_TIMEOUT_MS)) ?? []).filter((entry) => entry?.symbolName);
+}
+
+async function search(text) {
+  const query = String(text ?? '').trim().slice(0, 40);
+  const key = query.toLowerCase();
+  if (!key) return { value: [], at: Date.now(), error: null };
+  const kept = searches.get(key);
+  if (kept && Date.now() - kept.at < SEARCH_TTL_MS) return { value: kept.results, at: kept.at, error: null };
+  const asName = typedName(query);
+  const typed = asName.length >= 2 ? asName : null; // a name is two letters at least
+  const [lookup, named] = await Promise.all([
+    lookUp(query).then((found) => ({ found }), (err) => ({ found: [], err })),
+    typed ? offeredByName(typed) : [],
+  ]);
+  if (lookup.err && !named.length) throw lookup.err;
+  const { found } = lookup;
+
+  // Where the lookup would have each company it lists.
+  const home = new Map(); // issuer → { country, secondary }
+  for (const entry of found) {
+    const issuer = entry.issuerId ?? entry.symbolName;
+    const secondary = SECONDARY_VENUE.test(entry.exchangeName ?? '');
+    if (!home.has(issuer) || (home.get(issuer).secondary && !secondary)) home.set(issuer, { country: entry.countryCode, secondary });
+  }
+  // A company found by name is at home where its listing is, and the lookup's
+  // listings of it elsewhere are left out: those of its issuer, when the
+  // lookup says who issued its listing, else those under its name. The
+  // lookup may write the listing's symbol another way (NES.N-CH for NESN-CH).
+  const namedAs = new Map(); // a way of writing a named company's symbol → the symbol
+  const namedIssuers = new Map(); // issuer → market
+  const namedNames = new Map(); // name → market
+  for (const company of named) {
+    for (const form of company.forms) namedAs.set(form, company.symbol);
+    const entry = found.find((candidate) => company.forms.includes(candidate.symbolName));
+    if (entry?.issuerId != null) namedIssuers.set(entry.issuerId, company.market);
+    else for (const name of company.names) namedNames.set(name, company.market);
+  }
+
+  const offered = new Map(named.map(({ symbol, name, type, exchange, match }) => [symbol, { symbol, name, type, exchange, rank: match === 'name' ? 1 : 2 }]));
+  for (const entry of found) {
+    const issuer = entry.issuerId ?? entry.symbolName;
+    const parts = nameParts(entry.companyName ?? '');
+    const market = marketOf(entry.symbolName);
+    const exact = entry.symbolName.toLowerCase() === key;
+    const atHome = namedIssuers.has(issuer) ? namedIssuers.get(issuer) === market
+      : namedNames.has(parts.core) ? namedNames.get(parts.core) === market
+      : home.get(issuer).country === entry.countryCode;
+    if (!atHome && !exact) continue;
+    const rank = exact ? 0 : nameMatch(parts, typed) === 'name' ? 1 : PREFERRED.has(entry.issueType) ? 4 : 3;
+    const known = offered.get(namedAs.get(entry.symbolName) ?? entry.symbolName);
+    if (known) {
+      known.rank = Math.min(known.rank, rank);
+      known.type = entry.issueType || known.type;
+    } else {
+      offered.set(entry.symbolName, { symbol: entry.symbolName, name: entry.companyName || entry.symbolName, type: entry.issueType || null, exchange: entry.exchangeName || null, rank });
+    }
+  }
+  const shown = [...offered.values()].sort((a, b) => a.rank - b.rank).slice(0, SEARCH_SHOWN).map(({ rank, ...result }) => result);
+  // Without the lookup, what was found by name is offered but not kept.
+  if (lookup.err) return { value: shown, at: Date.now(), error: lookup.err.message };
+  searches.delete(key);
+  searches.set(key, { at: Date.now(), results: shown });
+  if (searches.size > SEARCH_KEPT) searches.delete(searches.keys().next().value);
+  return { value: shown, at: Date.now(), error: null };
+}
+
+// A share opened from the search box has the same panel as an index's
+// constituent, with its quote and key figures fetched on their own. Any symbol
+// the quote feed prices will do.
+const SHARE_SYMBOL = /^[^\s|,]{1,24}$/;
+const shareQuote = keyed(CONSTITUENT_TTL_MS, async (symbol) => {
+  const quote = (await fetchQuotes([symbol], true))[symbol];
+  if (!quote) throw new Error(`the quote feed has no price for ${symbol}`);
+  return quote;
+});
+
+async function quoteOfShare(symbol) {
+  if (!SHARE_SYMBOL.test(symbol ?? '')) throw new Error('that is not a symbol');
+  return shareQuote(symbol, symbol);
+}
+
+async function getShare(symbol) {
+  const priced = await quoteOfShare(symbol);
+  const quote = priced.value;
+  const filings = await edgar.financials({ ticker: symbol, names: [quote.fullName].filter(Boolean), us: !/-[A-Z]{2}$/.test(symbol) });
+  const share = { symbol, ticker: symbol, name: quote.fullName || symbol, quote, ...await withEarnings(symbol, quote, filings) };
+  return { value: share, at: priced.at, error: priced.error };
 }
 
 // ---- intraday sparklines --------------------------------------------------
@@ -493,8 +776,10 @@ function loadBars(symbol, interval, daysBack) {
   return loadBarsBetween(symbol, interval, Math.floor((now - daysBack * DAY_MS) / 3600_000) * 3600_000, now + DAY_MS);
 }
 
-async function loadBarsBetween(symbol, interval, start, end) {
-  const url = `${BARS_URL}/${encodeURIComponent(symbol)}/${interval}/${stamp(new Date(start))}/${stamp(new Date(end))}/adjusted/GMT.json`;
+// Prices are adjusted for stock splits (only for splits: not for dividends);
+// `basis` 'unadjusted' gives them as they traded.
+async function loadBarsBetween(symbol, interval, start, end, basis = 'adjusted') {
+  const url = `${BARS_URL}/${encodeURIComponent(symbol)}/${interval}/${stamp(new Date(start))}/${stamp(new Date(end))}/${basis}/GMT.json`;
   const data = await fetchJson(url);
   // Each bar is [time, close, high, low]. The feed marks a missing high or low
   // with a negative number; the close stands in for it.
@@ -752,15 +1037,15 @@ async function loadRange(range) {
   return { value: sparks, at: charted.at, error: charted.error || daily.error || weekly?.error || null };
 }
 
-// The same for one constituent of an index, for the chart in its company
-// panel: its line over a period and the close that period is measured from.
-// Fetched when the chart is asked for and kept as long as the intraday lines.
-const chartOf = keyed(SPARK_TTL_MS, async (indexSymbol, symbol, range) => {
+// The same for one company, for the chart in its panel: its line over a
+// period and the close that period is measured from. Fetched when the chart is
+// asked for and kept as long as the intraday lines.
+const chartOf = keyed(SPARK_TTL_MS, async (symbol, range, latestQuote) => {
   const spec = RANGES[range];
   if (!spec) return { spark: await intraday(symbol), from: null };
   // The quote is looked up on every load: the session it belongs to moves on
   // from day to day, and the period is counted back from it.
-  const { quote } = await constituent(indexSymbol, symbol);
+  const quote = await latestQuote();
   const source = HISTORY[spec.chart];
   const [daily, charted] = await Promise.all([
     loadBars(symbol, HISTORY.day.interval, HISTORY.day.daysBack),
@@ -773,10 +1058,76 @@ const chartOf = keyed(SPARK_TTL_MS, async (indexSymbol, symbol, range) => {
   return line ?? { spark: null, from: null };
 });
 
+// From an index's panel only its own constituents are charted; any other
+// share must be one the quote feed prices.
 async function getChart(indexSymbol, symbol, range) {
-  await constituent(indexSymbol, symbol); // only an index's own constituents are charted
+  const latestQuote = indexSymbol ? async () => (await constituent(indexSymbol, symbol)).quote : async () => (await quoteOfShare(symbol)).value;
+  await latestQuote();
   const period = RANGES[range] ? range : '1d';
-  return chartOf(`${indexSymbol}|${symbol}|${period}`, indexSymbol, symbol, period);
+  return chartOf(`${indexSymbol ?? ''}|${symbol}|${period}`, symbol, period, latestQuote);
+}
+
+// ---- the earnings behind the P/E line ---------------------------------------------
+
+// How many of today's shares one share was, week by week: the feed's prices as
+// they traded over its split-adjusted ones. That changes only at a split, so
+// it is kept as the weeks it changes in, [time, factor]: for NVIDIA 40 up to
+// its split of July 2021, 10 up to June 2024, then 1.
+const SPLIT_YEARS = 13; // as far back as the earnings kept (see edgar.js), and a year more
+const splitsOf = keyed(HISTORY.week.ttlMs, async (symbol) => {
+  const end = Date.now() + DAY_MS;
+  const start = end - SPLIT_YEARS * 366 * DAY_MS;
+  const [adjusted, traded] = await Promise.all([loadBarsBetween(symbol, '1W', start, end), loadBarsBetween(symbol, '1W', start, end, 'unadjusted')]);
+  const tradedAt = new Map(traded.map(([t, close]) => [t, close]));
+  const steps = [];
+  for (const [t, close] of adjusted) {
+    const factor = tradedAt.get(t) / close;
+    if (Number.isFinite(factor) && (!steps.length || Math.abs(factor / steps.at(-1)[1] - 1) > 0.01)) steps.push([t, factor]);
+  }
+  if (!steps.length) throw new Error('the price history to find its stock splits in is not loading');
+  return steps;
+});
+
+// The factor on a date: that of the last week begun by then.
+const factorOn = (steps) => (date) => {
+  const t = Date.parse(date);
+  let factor = steps[0][1];
+  for (const [at, value] of steps) {
+    if (at > t) break;
+    factor = value;
+  }
+  return factor;
+};
+
+// A company's statements for its panel, and the trailing earnings per share
+// its P/E line is drawn from. The filings behind those stay here.
+async function withEarnings(symbol, quote, { eps, ...filings }) {
+  return { filings, earnings: await earningsOf(symbol, quote, filings, eps) };
+}
+
+// The twelve months' earnings per share as each report made them known, in
+// today's shares (see trailingEarnings in edgar.js), or why there are none.
+async function earningsOf(symbol, quote, filings, eps) {
+  if (filings.status !== 'ok' || !eps?.length) return { status: 'none' };
+  // A price in one currency is not divided by earnings in another: a US
+  // company's listing abroad, or a company abroad that reports at home.
+  if (quote.currency && quote.currency !== filings.currency) return { status: 'currency', reported: filings.currency, quoted: quote.currency };
+  let steps;
+  try {
+    steps = (await splitsOf(symbol, symbol)).value;
+  } catch (err) {
+    return { status: 'error', message: err.message || String(err) };
+  }
+  const trailing = trailingEarnings(eps, factorOn(steps));
+  if (!trailing.length) return { status: 'none' };
+  // A company abroad files its earnings per ordinary share, and the depositary
+  // share quoted in New York may stand for several (two for Shell, six for
+  // BP), which no filing states. Where the feed's own P/E is far from this
+  // one, that is taken to be the case and the line is left out.
+  const pe = quote.last / trailing.at(-1).eps;
+  const feeds = quote.stats?.pe;
+  if (/^(20|40)-F/.test(filings.latest?.form ?? '') && feeds > 0 && pe > 0 && Math.abs(Math.log(pe / feeds)) > Math.log(1.5)) return { status: 'shares', pe, feeds };
+  return { status: 'ok', currency: filings.currency, trailing };
 }
 
 // ---- markets that never close -------------------------------------------------
@@ -972,6 +1323,7 @@ http
     if (pathname === '/api/chart') return sendData(res, 'chart', () => getChart(searchParams.get('index'), searchParams.get('symbol'), searchParams.get('range')));
     if (pathname === '/api/bases') return sendData(res, 'bases', loadBases);
     if (pathname === '/api/sparks') return sendData(res, 'sparks', () => getSparks(searchParams.get('range')));
+    if (pathname === '/api/search') return sendData(res, 'results', () => search(searchParams.get('q')));
     return sendStatic(res, decodeURIComponent(pathname));
   })
   .listen(PORT, HOST, () => {

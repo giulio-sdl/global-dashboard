@@ -19,6 +19,13 @@
       <h1><span>Global Markets</span></h1>
       <div class="flag" aria-hidden="true"></div>
     </div>
+    <!-- Any share, fund or index by symbol or name: it opens in the company panel. -->
+    <div class="search" role="search">
+      <label class="sr-only" for="search">Search by symbol or name</label>
+      <input id="search" type="search" placeholder="Search a ticker or company" autocomplete="off" spellcheck="false"
+        role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="search-results" enterkeyhint="go">
+      <ul id="search-results" class="search-results" role="listbox" aria-label="Matches" hidden></ul>
+    </div>
     <div class="controls">
       <span id="updated" class="updated" role="status" data-state="loading"><i class="live"></i><span>Loading…</span></span>
       <label class="control">
@@ -63,6 +70,8 @@
   <footer class="notes">
     <p>
       Click any row or tile for its chart and key figures; indexes also show the constituents that moved them, where weights are available.
+      The search box at the top (or "/") opens any share, fund or index by its symbol or name; a company's chart shows its P/E
+      from six months up, worked out from the earnings it files with the SEC.
       Cash indexes do not trade outside their session. While an exchange is shut, "Since close" shows how far a
       future or US-listed ETF on the same market has moved since the closing bell, as a guide to where the index
       would stand now. ETFs are priced in US dollars, so that figure includes currency moves, and it stays empty

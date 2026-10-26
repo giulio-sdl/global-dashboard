@@ -23,6 +23,7 @@
   --best: #7a22d6;
   --best-mark: #9340f0;
   --warn-mark: #f2b600;
+  --pe: #2a78d6; /* the P/E line: apart from the price's green, red and grey for every kind of colour vision */
   --led-off: #dddcd6;
   --glow: transparent;
   --carbon: none;
@@ -51,6 +52,7 @@
     --best: #cf97ff;
     --best-mark: #a44dff;
     --warn-mark: #ffd60a;
+    --pe: #3987e5;
     --led-off: #2b2b30;
     --glow: currentColor;
     --carbon:
@@ -83,6 +85,7 @@
   --best: #cf97ff;
   --best-mark: #a44dff;
   --warn-mark: #ffd60a;
+  --pe: #3987e5;
   --led-off: #2b2b30;
   --glow: currentColor;
   --carbon:
@@ -180,6 +183,51 @@ h1 span {
 .updated[data-state="paused"] .live::after { content: "PAUSED"; }
 .updated[data-state="stale"] .live { background: #ffd60a; }
 .updated[data-state="stale"] .live::after { content: "DELAYED"; }
+
+/* ---- search: any share, fund or index, opened in the company panel ---- */
+
+.search { position: relative; flex: 1 1 220px; max-width: 360px; }
+.search input {
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+.search input::placeholder { color: var(--muted); }
+/* The matches drop over the page, in the colours of the header band. */
+.search-results {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 8;
+  width: max(100%, 300px);
+  max-height: min(420px, 60vh);
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--accent);
+  border-radius: 4px;
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  list-style: none;
+}
+.search-results li {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 0 10px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.search-results b { overflow: hidden; font: 700 14px/1.35 var(--digits); text-overflow: ellipsis; }
+.search-results span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-results small { grid-column: 2; color: var(--muted); font-size: 11px; }
+.search-results li:hover, .search-results [aria-selected="true"] { background: var(--wash); box-shadow: inset 3px 0 0 var(--yellow); }
+.search-results li.none { display: block; color: var(--ink-2); cursor: default; box-shadow: none; background: none; }
 
 /* ---- sticky bar: section links and the period everything is measured over ---- */
 
@@ -629,6 +677,19 @@ dialog.detail h2::before, dialog.detail h2::after { content: none; }
 .d-chart figcaption { color: var(--ink-2); font: italic 700 13px/1.3 var(--display); letter-spacing: 0.07em; text-transform: uppercase; }
 /* The change over the period on show. */
 .d-chart figcaption .chip { margin-left: 10px; font: 700 16px/1.3 var(--digits); letter-spacing: 0; text-transform: none; }
+/* A company's legend: the price, and the P/E as a button that shows or hides its line. */
+.d-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-top: 6px; color: var(--ink-2); font-size: 12px; }
+.d-legend[hidden] { display: none; }
+.d-legend i { display: inline-block; width: 16px; margin-right: 6px; border-top: 2px solid var(--muted); vertical-align: middle; }
+.lg-main.up i { border-color: var(--up-mark); }
+.lg-main.down i { border-color: var(--down-mark); }
+.lg-second { height: 24px; padding: 0 8px; border: 1px solid var(--border); border-radius: 4px; background: none; color: inherit; font: inherit; cursor: pointer; }
+.lg-second:hover { background: var(--wash); }
+.lg-second i { border-color: var(--pe); }
+.lg-second b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+/* Hidden, or not drawn for this period: the key fades. */
+.lg-second[aria-pressed="false"] i, .lg-second.off i { opacity: 0.3; }
+.lg-note { color: var(--muted); }
 dialog.detail h4 { color: var(--ink-2); font-size: 13px; letter-spacing: 0.07em; }
 /* Faint vertical rules behind the chart, as on a telemetry trace. */
 .d-plot {
@@ -643,6 +704,9 @@ dialog.detail h4 { color: var(--ink-2); font-size: 13px; letter-spacing: 0.07em;
 .d-hi, .d-lo { position: absolute; left: 0; padding: 0 4px 0 0; background: var(--surface); color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; pointer-events: none; }
 .d-hi { top: 2px; }
 .d-lo { bottom: 2px; }
+/* The P/E line. */
+.spark .line2 { fill: none; stroke: var(--pe); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.spark .probe2 { fill: var(--pe); stroke: var(--surface); stroke-width: 2; }
 .d-axis { display: flex; justify-content: space-between; margin-top: 3px; color: var(--muted); font-size: 11px; }
 
 dialog.detail h3 { margin: 24px 0 2px; font-size: 18px; }
@@ -783,6 +847,7 @@ button.co:hover, button.co:focus-visible { text-decoration: underline; text-unde
   body { padding: 0 16px 28px; }
   .top, .bar { margin-inline: -16px; padding-inline: 16px; }
   .flag { display: none; }
+  .search { flex-basis: 100%; max-width: none; }
   .bar .filters-label { display: none; } /* the buttons speak for themselves; saves a sticky row */
   .bar .filters, .bar .ranges { width: 100%; }
   .tabs a { padding-inline: 8px; }

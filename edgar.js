@@ -27,6 +27,7 @@ const RETRY_MS = 3600_000;
 const REQUEST_GAP_MS = 150; // well inside the SEC's ten a second
 const YEARS_SHOWN = 5;
 const QUARTERS_SHOWN = 6;
+const EPS_YEARS = 12; // enough for the trailing twelve months at the start of a ten-year chart
 
 // The tags a figure may be filed under, per accounting standard. Companies
 // differ, and change tags over the years; the tag with the newest figure
@@ -43,7 +44,8 @@ const OVER_A_PERIOD = {
   netIncome: { 'us-gaap': ['NetIncomeLoss', 'ProfitLoss'], 'ifrs-full': ['ProfitLossAttributableToOwnersOfParent', 'ProfitLoss'] },
   eps: {
     'us-gaap': ['EarningsPerShareDiluted', 'EarningsPerShareBasicAndDiluted', 'EarningsPerShareBasic'],
-    'ifrs-full': ['DilutedEarningsLossPerShare', 'BasicEarningsLossPerShare'],
+    // Some file only the figure from continuing operations (Shell).
+    'ifrs-full': ['DilutedEarningsLossPerShare', 'BasicEarningsLossPerShare', 'DilutedEarningsLossPerShareFromContinuingOperations', 'BasicEarningsLossPerShareFromContinuingOperations'],
   },
   operatingCashFlow: {
     'us-gaap': ['NetCashProvidedByUsedInOperatingActivities', 'NetCashProvidedByUsedInOperatingActivitiesContinuingOperations'],
@@ -89,15 +91,20 @@ function reporting(facts) {
   return best;
 }
 
+// A figure's filings under each of its tags, the tag with the newest figure first.
+function byTag(facts, tags, unit) {
+  const newest = (list) => list.reduce((max, fact) => (fact.end > max ? fact.end : max), '');
+  return tags
+    .map((tag) => facts?.[tag]?.units?.[unit] ?? [])
+    .filter((list) => list.length)
+    .sort((a, b) => (newest(a) < newest(b) ? 1 : newest(a) > newest(b) ? -1 : 0));
+}
+
 // One figure's filed values, the newest filing of each period winning. Tags
 // are tried newest figure first; a later tag only adds periods the earlier
 // ones lack.
 function filed(facts, tags, unit) {
-  const newest = (list) => list.reduce((max, fact) => (fact.end > max ? fact.end : max), '');
-  const lists = tags
-    .map((tag) => facts?.[tag]?.units?.[unit] ?? [])
-    .filter((list) => list.length)
-    .sort((a, b) => (newest(a) < newest(b) ? 1 : newest(a) > newest(b) ? -1 : 0));
+  const lists = byTag(facts, tags, unit);
   const periods = new Map();
   for (const list of lists) {
     const own = new Map();
@@ -108,6 +115,21 @@ function filed(facts, tags, unit) {
     for (const [key, fact] of own) if (!periods.has(key)) periods.set(key, fact);
   }
   return [...periods.values()];
+}
+
+// Every filing of a figure over a period since `since`, not only the newest:
+// per-share figures are restated after a stock split, and the filing a value
+// comes from says which shares it counts (see trailingEarnings). Kept as
+// [start, end, value, filed]. Tags are taken as in `filed`.
+function everyFiling(facts, tags, unit, since) {
+  const claimed = new Set();
+  const all = [];
+  for (const list of byTag(facts, tags, unit)) {
+    const own = list.filter((fact) => fact.start && fact.end >= since && !claimed.has(`${fact.start}|${fact.end}`));
+    for (const fact of own) all.push([fact.start, fact.end, fact.val, fact.filed]);
+    for (const fact of own) claimed.add(`${fact.start}|${fact.end}`);
+  }
+  return all;
 }
 
 // A figure measured over a period, by fiscal year and by quarter. Companies
@@ -200,7 +222,63 @@ export function distill(company) {
     latest: newest && { form: newest.form, filed: newest.filed, period: newest.end },
     annual,
     quarterly: current ? quarterly : { periods: [], rows: {} },
+    // Earnings per share as filed, for the P/E line (see trailingEarnings).
+    eps: everyFiling(facts, OVER_A_PERIOD.eps[basis.standard], perShare, new Date(Date.now() - EPS_YEARS * 366 * DAY_MS).toISOString().slice(0, 10)),
   };
+}
+
+// ---- earnings per share over twelve months ---------------------------------------
+
+// Decimals a figure was filed with: 0.17 has two.
+const places = (value) => (String(value).split('.')[1] ?? '').length;
+
+// The earnings per share of the last twelve months, as each report made them
+// known: `at` is the day a period was first filed, `end` the day it closed.
+// A fiscal year is its own figure; any other twelve months are the last four
+// quarters added up. `eps` is the list distill keeps.
+//
+// A stock split changes what one share is. A filing counts in the shares of
+// its own day, and the filings after a split restate earlier figures in the
+// new ones, so every value is first brought to today's shares: divided by
+// `splitFactor(filed)`, how many of today's shares one share was on the day it
+// was filed (10 for NVIDIA before its split of June 2024, 1 after it). Prices
+// on the charts count today's shares too, so the two can be divided.
+export function trailingEarnings(eps, splitFactor) {
+  const periods = new Map();
+  for (const [start, end, raw, filed] of eps) {
+    const key = `${start}|${end}`;
+    periods.set(key, [...(periods.get(key) ?? []), { start, end, raw, filed, val: raw / splitFactor(filed) }]);
+  }
+  // The newest filing of a period wins, as in the statements, but an older
+  // one that it only rounds is more exact: NVIDIA's earnings for 2022 were
+  // filed as 1.74 a share before its split and as 0.17 after it, not 0.174.
+  const chosen = [...periods.values()].map((filings) => {
+    const newest = filings.reduce((a, b) => (b.filed > a.filed ? b : a));
+    const rounding = 0.5 * 10 ** -places(newest.raw) + 1e-9;
+    return filings
+      .filter((fact) => Math.abs(fact.val - newest.val) <= rounding)
+      .reduce((best, fact) => (Math.abs(fact.raw) > Math.abs(best.raw) ? fact : best), newest);
+  });
+  const { annual, quarterly } = overPeriods(chosen);
+  const firstFiled = new Map();
+  for (const [, end, , filed] of eps) if (!firstFiled.has(end) || filed < firstFiled.get(end)) firstFiled.set(end, filed);
+
+  const quarters = [...quarterly.keys()].sort();
+  const trailing = [];
+  for (const end of [...new Set([...annual.keys(), ...quarters])].sort()) {
+    let value = annual.get(end);
+    if (value == null) {
+      const four = quarters.filter((q) => q <= end).slice(-4);
+      // Four quarters in a row: the first closes about nine months before the last.
+      const span = four.length === 4 ? days(four[0], end) : 0;
+      if (four[3] === end && span >= 260 && span <= 290) value = four.reduce((sum, q) => sum + quarterly.get(q), 0);
+    }
+    if (value != null) trailing.push({ at: firstFiled.get(end), end, eps: Number(value.toFixed(4)) });
+  }
+  // A period filed late (an amendment, a first report covering several years)
+  // does not take the place of a newer one already known.
+  trailing.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.end < b.end ? -1 : 1));
+  return trailing.filter((entry, i) => trailing.slice(0, i).every((before) => before.end < entry.end));
 }
 
 // ---- finding the company ---------------------------------------------------------
@@ -235,7 +313,7 @@ export function createEdgar({ contact, cacheDir }) {
   const request = (url) => {
     const run = queue.then(async () => {
       const res = await fetch(url, { headers, signal: AbortSignal.timeout(45_000) });
-      if (!res.ok) throw new Error(`${new URL(url).hostname} responded ${res.status}`);
+      if (!res.ok) throw Object.assign(new Error(`${new URL(url).hostname} responded ${res.status}`), { status: res.status });
       return res.json();
     });
     queue = run.then(() => new Promise((resolve) => setTimeout(resolve, REQUEST_GAP_MS)), () => {});
@@ -248,7 +326,8 @@ export function createEdgar({ contact, cacheDir }) {
     await writeFile(path.join(cacheDir, name), JSON.stringify(value));
   };
 
-  // Every registrant with a ticker, by ticker and by name.
+  // Every registrant with a ticker, by ticker and by name, and once each in
+  // the SEC's own order (the largest companies first) under its first ticker.
   let registrants = null;
   async function index() {
     if (registrants && Date.now() - registrants.at < TICKERS_TTL_MS) return registrants;
@@ -268,6 +347,8 @@ export function createEdgar({ contact, cacheDir }) {
     }
     const byTicker = new Map();
     const byName = new Map();
+    const listed = [];
+    const ciks = new Set();
     for (const entry of kept.list) {
       const company = { cik: entry.cik_str, title: entry.title };
       if (!byTicker.has(tickerKey(entry.ticker))) byTicker.set(tickerKey(entry.ticker), company);
@@ -275,9 +356,18 @@ export function createEdgar({ contact, cacheDir }) {
       // Two different registrants under one name cannot be told apart: neither is used.
       if (byName.has(key) && byName.get(key)?.cik !== company.cik) byName.set(key, null);
       else if (!byName.has(key)) byName.set(key, company);
+      if (!ciks.has(company.cik)) listed.push({ ticker: entry.ticker, title: entry.title });
+      ciks.add(company.cik);
     }
-    registrants = { at, byTicker, byName };
+    registrants = { at, byTicker, byName, listed };
     return registrants;
+  }
+
+  // Every registrant once, as { ticker, title }, largest first. The search
+  // box finds companies by name in it.
+  async function registered() {
+    if (!contact) return [];
+    return (await index()).listed;
   }
 
   // A US-listed share is found by its ticker. A foreign one is not: its home
@@ -297,6 +387,7 @@ export function createEdgar({ contact, cacheDir }) {
   // quarterly reports). They are fetched again when the copy on disk is a
   // quarter old, or weekly once the next report is overdue.
   function due(kept) {
+    if (!kept.statements.eps) return true; // kept before earnings per share were
     const age = Date.now() - kept.at;
     if (age > QUARTER_MS) return true;
     const between = kept.statements.quarterly.periods.length ? 100 : 480;
@@ -315,13 +406,14 @@ export function createEdgar({ contact, cacheDir }) {
       return fresh;
     } catch (err) {
       if (kept) return kept; // the last copy is better than none
+      if (err.status === 404) return null; // a registrant with no figures filed at all (a fund, a trust)
       throw err;
     }
   }
 
   // What EDGAR has on a company, as { status, ... }. Never throws: a company
   // page still has its price and key figures when the SEC cannot be reached.
-  return async function financials(company) {
+  async function financials(company) {
     if (!contact) return { status: 'unconfigured' };
     try {
       const registrant = await find(company);
@@ -332,5 +424,7 @@ export function createEdgar({ contact, cacheDir }) {
     } catch (err) {
       return { status: 'error', message: err.message || String(err) };
     }
-  };
+  }
+
+  return { financials, registered };
 }
