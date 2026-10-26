@@ -1,6 +1,7 @@
-// The search box in the header: type a symbol or a name, pick a match, and
-// it opens in the company panel with its chart, P/E and financials. Enter
-// opens the highlighted match, else the first, else the text as a symbol. "/"
+// The search box in the header: type a symbol or a company's name, pick a
+// match, and it opens in the company panel with its chart, P/E and
+// financials. Enter opens the highlighted match, else the first, else the
+// text as a symbol when it could be one (a name with spaces cannot). "/"
 // anywhere on the page puts the cursor in the box. A search the server could
 // not answer is said to have failed, not to have found nothing, and is asked
 // again while the box is in use.
@@ -10,7 +11,8 @@ import { $, el, getJson } from './util.js';
 const WAIT_MS = 150; // typing pauses this long before the server is asked
 const RETRY_MS = 5_000; // a failed search is asked again after this
 const OPENS_ON = '5y'; // long enough for the P/E line to say something
-const TYPES = { STOCK: 'Share', CSRT: 'Share', ETF: 'ETF', ETN: 'ETN', FUND: 'Fund', INDEX: 'Index', DERIVATIVE: 'Future', WT: 'Warrant' };
+const TYPES = { STOCK: 'Share', CSRT: 'Share', ETF: 'ETF', ETN: 'ETN', FUND: 'Fund', INDEX: 'Index', DERIVATIVE: 'Future', WT: 'Warrant', PR: 'Preferred', CP: 'Preferred' };
+const SYMBOL = /^[^\s|,]{1,24}$/; // what the server takes for a symbol
 
 const input = $('#search');
 const list = $('#search-results');
@@ -82,7 +84,8 @@ function render() {
     el('small', { text: [TYPES[result.type] ?? null, result.exchange].filter(Boolean).join(' · ') }))));
   // Nothing found is said, so Enter's meaning (the text as a symbol) is clear.
   const typed = input.value.trim();
-  if (!results.length && typed) list.append(el('li', { class: 'none', text: `${failed ? 'The search is not answering just now.' : 'No matches.'} Enter opens ${typed.toUpperCase()} as a symbol.` }));
+  const asSymbol = SYMBOL.test(typed) ? ` Enter opens ${typed.toUpperCase()} as a symbol.` : '';
+  if (!results.length && typed) list.append(el('li', { class: 'none', text: `${failed ? 'The search is not answering just now.' : 'No matches.'}${asSymbol}` }));
   show(document.activeElement === input);
 }
 
@@ -127,8 +130,8 @@ function onKey(event) {
 }
 
 // Enter opens the highlighted match, else the first, else the text as a
-// symbol. Matches for what was typed before do not count: those for the text
-// now are waited for.
+// symbol when it could be one. Matches for what was typed before do not
+// count: those for the text now are waited for.
 async function enter() {
   const text = input.value.trim();
   if (!text) return;
@@ -137,7 +140,8 @@ async function enter() {
     await find();
     if (input.value.trim() !== text) return;
   }
-  pick(results[active] ?? results[0] ?? { symbol: text.toUpperCase(), name: text.toUpperCase() });
+  const chosen = results[active] ?? results[0] ?? (SYMBOL.test(text) ? { symbol: text.toUpperCase(), name: text.toUpperCase() } : null);
+  if (chosen) pick(chosen);
 }
 
 function pick(result) {

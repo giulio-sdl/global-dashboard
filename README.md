@@ -68,12 +68,17 @@ and every visitor's refreshes go to the data feeds through the one server.
   PEG, P/S, P/B, EV/revenue, EV/EBITDA), today and at the end of each of the last five quarters (see
   "Valuation measures" below). Both the search box and an index's panel open them.
 - **Search**: the box in the header finds any share, fund, index or future by its symbol or name, in any market
-  the quote feed covers, and opens it in the company panel on five years. Arrow keys and Enter pick a match;
-  Enter with none highlighted opens the first, or the text as a symbol when nothing matches. "/" anywhere on
-  the page puts the cursor in the box. A company listed in several countries is offered once, in its home
-  market; type another listing's symbol (`AAPL-CH`) to get that one. Funds, indexes and futures have their
-  chart and key figures, without statements. When the lookup cannot be reached the box says so, rather than
-  "No matches", and asks again every five seconds while the cursor is in it.
+  the quote feed covers, and opens it in the company panel on five years. A company's name can be typed
+  loosely: "coca cola", "jp morgan", "procter and gamble" and "unicredit" find KO, JPM, PG and UCG-IT. The
+  symbol typed comes first, then companies whose name is the one typed or begins with the words typed (the
+  dashboard's index constituents, and US companies by their whole name, from the SEC's list), largest first,
+  then the rest of the quote feed's own lookup. Arrow keys and Enter pick a match; Enter with none highlighted
+  opens the first, or the text as a symbol when nothing matches and it could be one. "/" anywhere on the page
+  puts the cursor in the box. A company listed in several countries is offered once, in its home market (for an
+  index constituent, the listing its index panel uses); type another listing's symbol (`AAPL-CH`) to get that
+  one. Funds, indexes and futures have their chart and key figures, without statements. When the lookup cannot
+  be reached the box says so, rather than "No matches", and asks again every five seconds while the cursor is
+  in it.
 - **P/E line**: on six months and longer, a company's chart carries its P/E: each price over the twelve months'
   diluted earnings per share known on that day, from its SEC filings (see "P/E over time" below).
 - **How constituent contributions are worked out**: a name's contribution is its weight at the start of the
@@ -177,8 +182,8 @@ The preferred order is Yahoo Finance, then CNBC, FRED and SEC EDGAR. In practice
 | Yahoo Finance | Nothing | Its data service turns programs away (HTTP 429) while answering a browser on the same computer, and it does not let another site's page read it. Using it would mean disguising the server as a browser, which this project does not do. |
 | CNBC quote feed | Every live price, every chart and every change over a period; each company's key figures, market cap and forward P/E; the search box's matches | The working first source. No key needed. |
 | FRED | Treasury yield history, when CNBC has none | Official daily yields from the St. Louis Fed. See [fred.js](fred.js). |
-| SEC EDGAR | Company financial statements, and the figures behind the valuation measures | As filed by the company. See [edgar.js](edgar.js). |
-| iShares | Index constituents and weights | Daily holdings files. See [holdings.js](holdings.js). |
+| SEC EDGAR | Company financial statements, and the figures behind the valuation measures; US companies' names for the search box | As filed by the company. See [edgar.js](edgar.js). |
+| iShares | Index constituents and weights; their names for the search box | Daily holdings files. See [holdings.js](holdings.js). |
 
 ### CNBC
 
