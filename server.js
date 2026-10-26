@@ -439,10 +439,13 @@ async function loadQuotes() {
       Object.assign(q, yearRange(q, history[symbol]));
     }
   }
-  // For an index whose exchange has closed, the move since then.
+  // For an index whose exchange has closed, the move since then: since the
+  // close of the session its quote belongs to. Ahead of the open the feed
+  // dates the quote today, and today's close is still to come.
   const proxyBars = await soon(getProxyBars);
   for (const { symbol, market, proxy } of proxyBars ? PROXIED : []) {
-    if (quotes[symbol]) quotes[symbol].after = sinceClose(quotes[symbol], MARKETS[market], quotes[proxy], proxyBars[proxy]);
+    const q = quotes[symbol];
+    if (q) q.after = sinceClose({ ...q, date: q.date && sessionOf(q, history?.[symbol]).date }, MARKETS[market], quotes[proxy], proxyBars[proxy]);
   }
   return quotes;
 }
