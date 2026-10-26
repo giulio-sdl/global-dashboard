@@ -326,7 +326,8 @@ export function createEdgar({ contact, cacheDir }) {
     await writeFile(path.join(cacheDir, name), JSON.stringify(value));
   };
 
-  // Every registrant with a ticker, by ticker and by name.
+  // Every registrant with a ticker, by ticker and by name, and once each in
+  // the SEC's own order (the largest companies first) under its first ticker.
   let registrants = null;
   async function index() {
     if (registrants && Date.now() - registrants.at < TICKERS_TTL_MS) return registrants;
@@ -346,6 +347,8 @@ export function createEdgar({ contact, cacheDir }) {
     }
     const byTicker = new Map();
     const byName = new Map();
+    const listed = [];
+    const ciks = new Set();
     for (const entry of kept.list) {
       const company = { cik: entry.cik_str, title: entry.title };
       if (!byTicker.has(tickerKey(entry.ticker))) byTicker.set(tickerKey(entry.ticker), company);
@@ -353,9 +356,18 @@ export function createEdgar({ contact, cacheDir }) {
       // Two different registrants under one name cannot be told apart: neither is used.
       if (byName.has(key) && byName.get(key)?.cik !== company.cik) byName.set(key, null);
       else if (!byName.has(key)) byName.set(key, company);
+      if (!ciks.has(company.cik)) listed.push({ ticker: entry.ticker, title: entry.title });
+      ciks.add(company.cik);
     }
-    registrants = { at, byTicker, byName };
+    registrants = { at, byTicker, byName, listed };
     return registrants;
+  }
+
+  // Every registrant once, as { ticker, title }, largest first. The search
+  // box finds companies by name in it.
+  async function registered() {
+    if (!contact) return [];
+    return (await index()).listed;
   }
 
   // A US-listed share is found by its ticker. A foreign one is not: its home
@@ -401,7 +413,7 @@ export function createEdgar({ contact, cacheDir }) {
 
   // What EDGAR has on a company, as { status, ... }. Never throws: a company
   // page still has its price and key figures when the SEC cannot be reached.
-  return async function financials(company) {
+  async function financials(company) {
     if (!contact) return { status: 'unconfigured' };
     try {
       const registrant = await find(company);
@@ -412,5 +424,7 @@ export function createEdgar({ contact, cacheDir }) {
     } catch (err) {
       return { status: 'error', message: err.message || String(err) };
     }
-  };
+  }
+
+  return { financials, registered };
 }
