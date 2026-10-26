@@ -1379,7 +1379,8 @@ function readJson(req, limit = 4096) {
       else chunks.push(chunk);
     });
     req.on('end', () => {
-      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch { reject(new Refusal('That request is not JSON.')); }
+      // A body of `null` is JSON too, and changes nothing.
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') ?? {}); } catch { reject(new Refusal('That request is not JSON.')); }
     });
     req.on('error', reject);
   });
@@ -1493,7 +1494,17 @@ async function sendStatic(res, pathname) {
 
 http
   .createServer((req, res) => {
-    const { pathname, searchParams } = new URL(req.url, 'http://localhost');
+    // An address that cannot be read (a stray "%" in it, say) is turned away:
+    // left to throw, it would stop the server.
+    let url;
+    let file;
+    try {
+      url = new URL(req.url, 'http://localhost');
+      file = decodeURIComponent(url.pathname);
+    } catch {
+      return sendJson(res, 400, { error: 'That address cannot be read.' });
+    }
+    const { pathname, searchParams } = url;
     if (pathname === '/api/config') return sendJson(res, 200, configFor(req));
     // Each refresh says which layout it belongs to, so a page open while the
     // layout was changed elsewhere (the Mac app and a browser) catches up.
@@ -1505,7 +1516,7 @@ http
     if (pathname === '/api/bases') return sendData(res, 'bases', loadBases);
     if (pathname === '/api/sparks') return sendData(res, 'sparks', () => getSparks(searchParams.get('range')));
     if (pathname === '/api/search') return sendData(res, 'results', () => search(searchParams.get('q')));
-    return sendStatic(res, decodeURIComponent(pathname));
+    return sendStatic(res, file);
   })
   .listen(PORT, HOST, () => {
     console.log(`Global Dashboard running at http://${HOST === '127.0.0.1' ? 'localhost' : HOST}:${PORT}`);
