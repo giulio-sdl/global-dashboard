@@ -19,8 +19,11 @@ export const MARKETS = {
   in: { label: 'NSE India', tz: 'Asia/Kolkata', sessions: [['09:15', '15:30']], ref: '.NSEI' },
 };
 
-// Group kinds: 'quote'  = last / change / trend / 52-week range,
+// Group kinds: 'quote'  = last / change / 52-week range,
 //              'matrix' = currency cross-rate grid.
+// A section with `ath` also shows how far each row is from its all-time high
+// (see "all-time highs" in server.js): indexes, coins and commodities, not
+// yields or currencies.
 // A group with `markets` is a country: it gets its own heading and exchange
 // status, and its last column shows the move since the close while the
 // exchange is shut. Per index:
@@ -45,6 +48,7 @@ export const SECTIONS = [
   {
     id: 'equities',
     title: 'Equity indexes',
+    ath: true,
     cards: [
       {
         title: 'Americas and Europe',
@@ -98,6 +102,7 @@ export const SECTIONS = [
   {
     id: 'crypto',
     title: 'Crypto',
+    ath: true,
     cards: [
       {
         title: 'Crypto indexes',
@@ -213,6 +218,7 @@ export const SECTIONS = [
   {
     id: 'commodities',
     title: 'Commodities',
+    ath: true,
     cards: [
       {
         title: 'Energy',

@@ -70,11 +70,15 @@ let PROXIED; // indexes whose move since the close is read from a future or ETF 
 let PROXY_SYMBOLS;
 let INDEX_ITEMS; // indexes whose constituents the detail panel shows
 let ROLLING; // rows priced round the clock (see "markets that never close")
+let ATH_SYMBOLS; // rows whose distance from their all-time high the page shows (see "all-time highs")
 
 function applyLayout() {
-  const rows = LAYOUT.current().sections.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) =>
+  const { sections } = LAYOUT.current();
+  const rowsOf = (list) => list.flatMap((s) => s.cards.flatMap((c) => c.groups.flatMap((g) =>
     g.items.filter((item) => item.symbol).map((item) => ({ ...item, market: item.market ?? g.markets?.[0] })))));
+  const rows = rowsOf(sections);
   SYMBOLS = [...new Set(rows.map((item) => item.symbol))];
+  ATH_SYMBOLS = [...new Set(rowsOf(sections.filter((s) => s.ath)).map((item) => item.symbol))];
   CHART_SYMBOL = new Map(rows.map((item) => [item.symbol, item.chart ?? item.symbol]));
   FRED_SERIES = new Map(rows.filter((item) => item.fred).map((item) => [item.symbol, item.fred]));
   PROXIED = rows.filter((item) => item.proxy).map((item) => ({ symbol: item.symbol, market: item.market, proxy: item.proxy.symbol }));
@@ -438,6 +442,13 @@ async function loadQuotes() {
       if (!q.rolling && awaitingOpen(q)) restoreLastSession(q, history[symbol]);
       Object.assign(q, yearRange(q, history[symbol]));
     }
+  }
+  // The all-time highs take a while to load after start-up too; the rows show
+  // theirs from the first refresh after they arrive.
+  const highs = await allTimeHighs();
+  for (const symbol of highs ? ATH_SYMBOLS : []) {
+    const q = quotes[symbol];
+    if (q) Object.assign(q, allTimeHigh(q, highs[symbol], history?.[symbol]));
   }
   // For an index whose exchange has closed, the move since then: since the
   // close of the session its quote belongs to. Ahead of the open the feed
@@ -1203,6 +1214,59 @@ async function earningsOf(symbol, quote, filings, eps) {
   return { status: 'ok', currency: filings.currency, trailing };
 }
 
+// ---- all-time highs -----------------------------------------------------------
+
+// The highest price each row of the sections marked `ath` has traded at. The
+// feed's weekly bars reach as far back as its history goes (1928 for the S&P
+// 500, 1970 for platinum, but only 2005 for sugar), and the week with the
+// highest high is looked up in its daily bars for the day. That history
+// changes only when a record is set, which the last year's daily bars and
+// today's trading cover at every refresh (see allTimeHigh), so it is fetched
+// once a day.
+const ATH_TTL_MS = 24 * 3600_000;
+const ATH_CONCURRENCY = 4; // the longest histories run to several thousand bars
+const ATH_FROM = Date.UTC(1900, 0, 1); // earlier than any history the feed has
+
+// The feed now and then answers with a shorter history for the same row: on
+// 2026-11-06 platinum came back from 2006 rather than 1970, once in four
+// requests. A history that starts later than one already had for the row is
+// taken as cut short, so the request counts as failed: the row keeps its
+// figures and is asked again shortly (see cached).
+const historyStart = new Map();
+
+async function loadAllTimeHigh(symbol) {
+  const chart = CHART_SYMBOL.get(symbol);
+  const weeks = await loadBarsBetween(chart, '1W', ATH_FROM, Date.now() + DAY_MS);
+  // As with the other histories, an empty answer is a failed request, asked again.
+  if (!weeks.length) throw new Error('no bars');
+  if (weeks[0][0] > (historyStart.get(symbol) ?? Infinity)) throw new Error('history cut short');
+  historyStart.set(symbol, weeks[0][0]);
+  const top = weeks.reduce((best, bar) => (bar[2] > best[2] ? bar : best));
+  // A weekly bar is dated the Sunday its week begins. Should the week's days
+  // not load, that Sunday stands for the day.
+  const days = await loadBarsBetween(chart, '1D', top[0], top[0] + 7 * DAY_MS).catch(() => []);
+  const day = days.length ? days.reduce((best, bar) => (bar[2] > best[2] ? bar : best)) : top;
+  return { high: top[2], time: day[0], since: weeks[0][0] };
+}
+
+const getAllTimeHighs = cached(ATH_TTL_MS, (known) => forEachSymbol(loadAllTimeHigh, ATH_SYMBOLS, ATH_CONCURRENCY, known));
+const allTimeHighs = steady(getAllTimeHighs);
+
+// A row's all-time high as of now: the one in its long history, or a higher
+// one set since that was fetched, in the last year's daily bars or today.
+// Without the long history there is nothing to show: a year's high is not it.
+function allTimeHigh(q, deep, daily) {
+  if (!deep) return {};
+  let high = deep.high;
+  let date = barDate([deep.time]);
+  for (const bar of daily ?? []) {
+    if (bar[2] > high) [high, date] = [bar[2], barDate(bar)];
+  }
+  const today = Math.max(q.high ?? q.last, q.last);
+  if (today > high) [high, date] = [today, q.date ?? new Date().toISOString().slice(0, 10)];
+  return { ath: high, athDate: date, athFrom: barDate([deep.since]) };
+}
+
 // ---- markets that never close -------------------------------------------------
 
 // Crypto is priced round the clock, so its periods are spans of the clock and
@@ -1333,7 +1397,7 @@ async function loadBases() {
 // Fetches every period's history once at start-up, one bar size at a time, so
 // the first switch to a longer period does not wait on sixty-odd requests.
 async function warmUp() {
-  for (const get of [getQuotes, getProxyBars, getIntraday, getMinutes, ...Object.values(HISTORY).map((source) => source.get), getHoursBack, getYearsBack]) {
+  for (const get of [getQuotes, getProxyBars, getIntraday, getMinutes, ...Object.values(HISTORY).map((source) => source.get), getHoursBack, getYearsBack, getAllTimeHighs]) {
     await get().catch(() => {});
   }
 }
@@ -1418,6 +1482,7 @@ function fillRows(symbols) {
   const sources = [
     [symbols, [getQuotes, getIntraday, ...Object.values(HISTORY).map((source) => source.get)]],
     [rolling, [getMinutes, getHoursBack, getYearsBack]],
+    [symbols.filter((symbol) => ATH_SYMBOLS.includes(symbol)), [getAllTimeHighs]],
   ];
   const filled = Promise.all(sources.flatMap(([list, gets]) => (list.length ? gets.map((get) => get.include(list).catch(() => {})) : [])));
   return Promise.race([filled, new Promise((resolve) => setTimeout(resolve, FILL_PATIENCE_MS))]);
