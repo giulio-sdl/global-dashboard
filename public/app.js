@@ -377,7 +377,8 @@ function buildMatrix(group) {
   return el('div', { class: 'scroll' }, table);
 }
 
-// A headline instrument at the top of the page: name, value, change, trend.
+// A headline instrument at the top of the page: name, value, change, how far
+// from its all-time high, trend.
 function buildTile(item) {
   const revs = el('span', { class: 'revs', 'aria-hidden': 'true' });
   for (let i = 0; i < REV_LEDS * 2; i++) revs.append(el('i'));
@@ -387,6 +388,7 @@ function buildTile(item) {
     el('span', { class: 't-value', text: '—' }),
     // The four changes of the selected view, each under its own label.
     el('span', { class: 't-moves' }, ...CHANGE_COLUMNS.map(() => el('span', { class: 't-move' }, el('small'), el('b', { class: 'na', text: '—' })))),
+    el('span', { class: 't-ath' }),
     el('span', { class: 't-after' }),
     lineSvg(),
   );
@@ -495,33 +497,43 @@ function renderRow(tr) {
   renderRange($('.range', tr), q);
 }
 
-// How far a row is below its all-time high, with when that was set under it
-// and the level on hover. A row at its high says so instead, in green.
+// How far a quote is below its all-time high and when that was set, with the
+// level on hover; at its high it says so instead, in green. Null for a quote
+// without one (yields, currencies, or before the long history has loaded).
+function athView(q) {
+  if (!q.ath) return null;
+  const below = (q.last / q.ath - 1) * 100;
+  const record = below > -0.005;
+  return {
+    text: record ? 'At ATH' : signed(below, 2, '%').text,
+    record,
+    when: setOn(q.athDate, q.date),
+    shortWhen: setOn(q.athDate, q.date, true),
+    title: `All-time high ${fmt(q.ath, q.dp)} on ${longDate(q.athDate)}. The price history goes back to ${monthOf(q.athFrom)}.`,
+  };
+}
+
+// A row's From ATH column, with when the high was set under the figure.
 function renderAth(cell, under, q) {
-  const below = q.ath ? (q.last / q.ath - 1) * 100 : null;
-  const record = below != null && below > -0.005;
-  const text = record ? 'At ATH' : signed(below, 2, '%').text;
-  const when = q.athDate ? setOn(q.athDate, q.date) : '';
+  const ath = athView(q);
   const figure = $('.ap', cell);
-  figure.textContent = text;
-  figure.classList.toggle('up', record);
-  $('.ad', cell).textContent = when;
-  cell.title = q.ath
-    ? `All-time high ${fmt(q.ath, q.dp)} on ${longDate(q.athDate)}. The price history goes back to ${monthOf(q.athFrom)}.`
-    : 'Shown once the long price history has loaded';
+  figure.textContent = ath?.text ?? '—';
+  figure.classList.toggle('up', Boolean(ath?.record));
+  $('.ad', cell).textContent = ath?.when ?? '';
+  cell.title = ath?.title ?? 'Shown once the long price history has loaded';
   // On a card too narrow for the column, under the name.
-  under.replaceChildren(...(q.ath ? ['From ATH ', el('b', { class: record ? 'up' : '', text }), ` · ${when}`] : []));
+  under.replaceChildren(...(ath ? ['From ATH ', el('b', { class: ath.record ? 'up' : '', text: ath.text }), ` · ${ath.when}`] : []));
 }
 
 // When a high was set: "today", the day this year ("16 Oct"), or the month
-// of an earlier year ("Oct 2007").
+// of an earlier year ("Oct 2007"), or just its year (`short`, for the tiles).
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const monthOf = (iso) => `${MONTH_NAMES[Number(iso.slice(5, 7)) - 1]} ${iso.slice(0, 4)}`;
 const longDate = (iso) => `${Number(iso.slice(8, 10))} ${monthOf(iso)}`;
-function setOn(iso, session) {
+function setOn(iso, session, short = false) {
   if (iso === session) return 'today';
   if (Number(iso.slice(0, 4)) === new Date().getFullYear()) return `${Number(iso.slice(8, 10))} ${MONTH_NAMES[Number(iso.slice(5, 7)) - 1]}`;
-  return monthOf(iso);
+  return short ? iso.slice(0, 4) : monthOf(iso);
 }
 
 // Places today's price on the bar between its 52-week low and high.
@@ -596,6 +608,12 @@ function renderTile(tile) {
   const moved = signed(after?.pct, 2, '%');
   $('.t-after', tile).replaceChildren(...(after ? ['Since close ', el('b', { class: moved.dir, text: moved.text })] : []));
   $('.t-after', tile).title = after ? `Read from ${after.source}` : '';
+  // When the high was set goes where the tile has room for it: the day this
+  // year, the year before that, and all of it on hover.
+  const ath = athView(q);
+  const line = $('.t-ath', tile);
+  line.replaceChildren(...(ath ? ['From ATH ', el('b', { class: ath.record ? 'up' : '', text: ath.text }), el('span', { class: 't-when', text: ` · ${ath.shortWhen}` })] : []));
+  line.title = ath?.title ?? '';
   renderLine($('.spark', tile), q, TILE_SPARK);
 }
 

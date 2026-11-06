@@ -38,7 +38,7 @@ and every visitor's refreshes go to the data feeds through the one server.
 ## What it shows
 
 - **At a glance**: a row of headline tiles (main index per region, gold, Brent, EUR/USD, USD/CHF, CoinDesk 20, Bitcoin) with value,
-  change, trend and exchange status. The list is `OVERVIEW` in [instruments.js](instruments.js), and can be
+  change, how far below the all-time high (see "From ATH"), trend and exchange status. The list is `OVERVIEW` in [instruments.js](instruments.js), and can be
   changed from the page (see "Changing the instruments").
 - A bar that stays in view while scrolling, with links to each section and the period selector.
 - **Main indexes** in two cards (Americas and Europe; Asia, including South Korea), two or three per country, each country with its
@@ -115,7 +115,8 @@ and every visitor's refreshes go to the data feeds through the one server.
 - Each row has the 52-week range (hover for the low and high). An index has its range under its level, as its
   last column holds the move since the close.
 - **From ATH**: indexes, coins and commodities show how far they are below their all-time high, with when it
-  was set under the figure (hover for the level, the day, and how far back the price history goes). The high
+  was set under the figure (hover for the level, the day, and how far back the price history goes). Their
+  tiles show it too, with the day this year or the year before that, where the tile is wide enough. The high
   is the highest price in the feed's whole weekly history, fetched once a day, or a higher one since: in the
   last year's daily bars or today's trading. That history reaches back to 1928 for the S&P 500 and to the
   1970s for gold, silver and platinum, but only to 2005 for sugar, 2010 for Bitcoin and late 2025 for Sui;
