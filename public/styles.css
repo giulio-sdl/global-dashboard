@@ -405,7 +405,10 @@ h2 {
 h2::before { content: ""; flex: none; width: 15px; height: 15px; background: var(--accent); clip-path: polygon(45% 0, 100% 0, 55% 100%, 0 100%); }
 h2::after { content: ""; flex: 1; height: 1px; background: var(--grid); }
 
-.cards { columns: 540px; column-gap: 16px; }
+/* Cards go side by side only when each gets 640px or more. The columns beside the names take up to 540px
+   and the names want about 100px, so a 1920px window shows two cards with every column, not three with
+   the names cut to a letter. A card still too narrow for all its columns drops some (see the end of this file). */
+.cards { columns: 640px; column-gap: 16px; }
 
 .card {
   container-type: inline-size;
@@ -931,15 +934,21 @@ tr.just-added > * { animation: just-added 2.4s ease-out; }
 .toast[hidden] { display: none; }
 .toast:has(> button[hidden]) { padding-right: 14px; }
 
-@container (max-width: 560px) {
-  .c-range, .c-ext { display: none; }
+/* A card drops a column as soon as keeping it would leave the names under 100px. The columns beside the
+   names take 540px with Since close (96px), 520px with the 52-week range (76px), 444px with neither and
+   250px with only one change. */
+@container (max-width: 640px) {
+  .c-ext { display: none; }
   .oh:not(:empty) { display: block; }
+}
+@container (max-width: 620px) {
+  .c-range { display: none; }
 }
 @container (max-width: 470px) {
   .c-spark { display: none; }
   .c-last { width: 84px; }
 }
-@container (max-width: 500px) {
+@container (max-width: 544px) {
   .c-more { display: none; }
   .multi { display: block; }
   .c-pct { width: 78px; }
