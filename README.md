@@ -38,7 +38,7 @@ and every visitor's refreshes go to the data feeds through the one server.
 ## What it shows
 
 - **At a glance**: a row of headline tiles (main index per region, gold, Brent, EUR/USD, USD/CHF, CoinDesk 20, Bitcoin) with value,
-  change, trend and exchange status. The list is `OVERVIEW` in [instruments.js](instruments.js), and can be
+  change, how far below the all-time high (see "From ATH"), trend and exchange status. The list is `OVERVIEW` in [instruments.js](instruments.js), and can be
   changed from the page (see "Changing the instruments").
 - A bar that stays in view while scrolling, with links to each section and the period selector.
 - **Main indexes** in two cards (Americas and Europe; Asia, including South Korea), two or three per country, each country with its
@@ -112,12 +112,19 @@ and every visitor's refreshes go to the data feeds through the one server.
 - **Commodities**: front-month futures for energy, metals and agriculture.
 - **Currencies**: USD, EUR, CHF, JPY, BRL and CNY. Spot pairs against the dollar, the euro and franc crosses
   the feed quotes directly, and a cross-rate grid for every other combination (derived from the USD pairs).
-- Each row has a trend line (hover for values) and the 52-week range (hover for the low and high). An index has
-  its range under its level, as its last column holds the move since the close.
+- Each row has the 52-week range (hover for the low and high). An index has its range under its level, as its
+  last column holds the move since the close.
+- **From ATH**: indexes, coins and commodities show how far they are below their all-time high, with when it
+  was set under the figure (hover for the level, the day, and how far back the price history goes). Their
+  tiles show it too, with the day this year or the year before that, where the tile is wide enough. The high
+  is the highest price in the feed's whole weekly history, fetched once a day, or a higher one since: in the
+  last year's daily bars or today's trading. That history reaches back to 1928 for the S&P 500 and to the
+  1970s for gold, silver and platinum, but only to 2005 for sugar, 2010 for Bitcoin and late 2025 for Sui;
+  for those the figure is the highest since. Yields and currencies have none.
 - **Short term / Long term**: the switch at the top right sets which four changes every table and tile
-  shows. Short term is 1 day, 5 days, 1 month and 3 months, with a 3-month trend line; long term is 6 months,
-  1 year, 5 years and 10 years, with a 10-year line (or as much history as there is). Yields show the same
-  periods in basis points. The detail panel's chart has its own period buttons for all eight.
+  shows. Short term is 1 day, 5 days, 1 month and 3 months, and the tiles' trend lines cover 3 months; long
+  term is 6 months, 1 year, 5 years and 10 years, with 10-year lines (or as much history as there is). Yields
+  show the same periods in basis points. The detail panel's chart has its own period buttons for all eight.
 - **How periods are measured**: always from a closing level, counted back from the instrument's latest
   session. Five days is the close five sessions earlier; months and years are the last close on or before the
   same date that long ago (the last weekly close for 5Y and 10Y). Futures use the continuous front-month
@@ -152,8 +159,8 @@ outlast a restart. "Done" puts the controls away.
 - **Adding**: type a symbol, or pick one of the suggestions for that table (CAC 40, IBEX 35, ASX 200, Bovespa,
   Dogecoin, orange juice and so on; the list is [public/catalog.js](public/catalog.js)). The server asks the
   quote feed for it first, so a symbol the feed does not know is turned away, and so is one already on the page.
-  Without a name the feed's own is used. The new row has its price straight away and its longer changes and
-  trend line within a few seconds.
+  Without a name the feed's own is used. The new row has its price straight away, and its longer changes and
+  (for an index, coin or commodity) its all-time high within a few seconds.
 - **Where a new row goes**: at the end of its table. An index added to a country has that exchange's status,
   but no "Since close" figure and no constituents: those need a proxy and an iShares fund, which are set in
   [instruments.js](instruments.js). Indexes that belong to no country listed (Canada, Brazil, Australia) go
@@ -190,7 +197,8 @@ The preferred order is Yahoo Finance, then CNBC, FRED and SEC EDGAR. In practice
 ### CNBC
 
 Quotes and intraday bars come from CNBC's public quote feed, proxied and cached by [server.js](server.js)
-(quotes 10 s, intraday charts 3 min, longer history 10 min to 6 h). It needs no API key. US cash indexes, ETFs and currencies are real-time; other indexes,
+(quotes 10 s, intraday charts 3 min, longer history 10 min to 6 h, the whole history behind the all-time
+highs a day). It needs no API key. US cash indexes, ETFs and currencies are real-time; other indexes,
 futures and commodities are delayed by roughly 10–20 minutes.
 
 The Mac's own resolver sometimes says one of CNBC's hosts does not exist, for a minute or so at a time, while
@@ -339,6 +347,12 @@ Known weak spots of the feed, not corrected: the daily history of thinly traded 
 from one request to the next (nickel most of all), and the S&P Bitcoin and Ethereum indexes get yesterday's
 daily close a few hours late. When one of the last five closes is missing, that row's 5-day change is measured
 from a session too early until the history is next refreshed (hourly).
+
+The weekly history behind the all-time highs sometimes comes back shorter for the same row: platinum's from
+2006 rather than 1970, once in four requests on 2026-11-06. A history that starts later than one the server
+has already had for that row counts as a failed request, so the row keeps its high and is asked again after
+20 seconds. Just after a restart there is nothing to compare with, so a short first answer would stand until
+the next day's load; that only matters where the high is in the missing years.
 
 Not available from this feed: CSI 300 and BSE Sensex, non-US index
 futures other than Nikkei, the 52-week low for several commodity contracts, and direct quotes for the

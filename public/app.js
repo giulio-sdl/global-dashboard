@@ -10,7 +10,6 @@ const SPARK_REFRESH_MS = 180_000;
 const BASES_REFRESH_MS = 600_000;
 const BASES_RETRY_MS = 20_000;
 const HISTORY_MISSING = 'The price history is not loading right now, so trend lines, charts and the changes beyond one day are missing for most rows. Prices are live. This keeps retrying on its own and fills in when the history returns.';
-const SPARK = { w: 76, h: 30, pad: 4 };
 const TILE_SPARK = { w: 200, h: 40, pad: 4 };
 const FLASH_MS = 700;
 // Shift lights on each tile: six per side, lit by the first change of the
@@ -117,12 +116,14 @@ function renderPills() {
 // Their headers are filled in by showMode. A yield moves in basis points
 // rather than percent, and country tables give the 52-week range's column to
 // the move since the close, and show the range under the index's level.
+// Indexes, coins and commodities (`ath` sections) also show how far each is
+// from its all-time high.
 const CHANGE_COLUMNS = [0, 1, 2, 3].map((slot) => ['', slot ? 'c-pct c-more' : 'c-pct', slot]);
 const YIELD_DP = 3;
-const columnsFor = (group) => [
+const columnsFor = (group, ath) => [
   [group.yields ? 'Yield' : 'Last', 'c-last'],
   ...CHANGE_COLUMNS,
-  ['', 'c-spark'],
+  ...(ath ? [['From ATH', 'c-ath']] : []),
   group.markets ? ['Since close', 'c-ext'] : ['52-wk range', 'c-range'],
 ];
 
@@ -135,7 +136,7 @@ function buildRange() {
   return range;
 }
 
-function buildRow(item, sinceClose, group) {
+function buildRow(item, sinceClose, group, ath) {
   const tr = el('tr', { 'data-sym': item.symbol });
   tr.item = item;
   // The whole row opens the detail panel; the name is a real button so the
@@ -148,11 +149,12 @@ function buildRow(item, sinceClose, group) {
       // Figures that move under the name where the card is too narrow for their columns.
       el('span', { class: 'sub oh' }),
       el('span', { class: 'sub multi' }),
+      el('span', { class: 'sub oa' }),
       ...(group.key ? [buildRowEdit(item, group)] : []),
     ),
     el('td', { class: 'c-last last' }, el('span', { class: 'lv', text: '—' }), ...(sinceClose ? [buildRange()] : [])),
     ...CHANGE_COLUMNS.map(([, cls]) => el('td', { class: cls }, el('span', { class: 'chip na', text: '—' }))),
-    el('td', { class: 'c-spark' }, lineSvg()),
+    ...(ath ? [el('td', { class: 'c-ath' }, el('span', { class: 'nm ap', text: '—' }), el('span', { class: 'sub ad' }))] : []),
     sinceClose
       ? el('td', { class: 'c-ext' }, el('span', { class: 'nm xp', text: '—' }), el('span', { class: 'sub xc' }))
       : el('td', { class: 'c-range' }, buildRange()),
@@ -168,21 +170,22 @@ function buildPills(markets = []) {
   return pills;
 }
 
-function buildTable(group, repeatHeader) {
+function buildTable(group, repeatHeader, ath) {
   // A country group names itself in a heading above the table, next to its
   // exchange status, so its header row only repeats the column labels.
   const headed = Boolean(group.markets);
   const silent = headed && repeatHeader;
   const head = el('tr', {}, el('th', { scope: 'col' }, el('span', { class: silent ? 'sr-only' : '', text: headed ? 'Index' : group.label })));
-  for (const [label, cls, slot] of columnsFor(group)) {
+  for (const [label, cls, slot] of columnsFor(group, ath)) {
     // Repeated column labels within a card stay available to screen readers only.
     const text = el('span', { class: repeatHeader ? 'sr-only' : '', text: label });
     if (slot != null) text.dataset.slot = slot;
     head.append(el('th', { scope: 'col', class: cls }, text));
   }
   const body = el('tbody');
-  for (const item of group.items) body.append(buildRow(item, headed, group));
-  const table = el('table', { class: headed ? 'quote after' : group.yields ? 'quote yields' : 'quote' }, el('thead', { class: silent ? 'silent' : '' }, head), body);
+  for (const item of group.items) body.append(buildRow(item, headed, group, ath));
+  const kind = headed ? 'quote after' : group.yields ? 'quote yields' : 'quote';
+  const table = el('table', { class: ath ? `${kind} ath` : kind }, el('thead', { class: silent ? 'silent' : '' }, head), body);
   // A table with every row removed (or one waiting for its first) shows only while editing.
   const empty = !group.items.length;
   table.classList.toggle('empty', empty);
@@ -374,7 +377,8 @@ function buildMatrix(group) {
   return el('div', { class: 'scroll' }, table);
 }
 
-// A headline instrument at the top of the page: name, value, change, trend.
+// A headline instrument at the top of the page: name, value, change, how far
+// from its all-time high, trend.
 function buildTile(item) {
   const revs = el('span', { class: 'revs', 'aria-hidden': 'true' });
   for (let i = 0; i < REV_LEDS * 2; i++) revs.append(el('i'));
@@ -384,6 +388,7 @@ function buildTile(item) {
     el('span', { class: 't-value', text: '—' }),
     // The four changes of the selected view, each under its own label.
     el('span', { class: 't-moves' }, ...CHANGE_COLUMNS.map(() => el('span', { class: 't-move' }, el('small'), el('b', { class: 'na', text: '—' })))),
+    el('span', { class: 't-ath' }),
     el('span', { class: 't-after' }),
     lineSvg(),
   );
@@ -410,7 +415,7 @@ function build(config) {
           Object.assign(item, { index: Boolean(group.markets), market: item.market ?? group.markets?.[0], yield: Boolean(group.yields) });
           if (!items.has(item.symbol)) items.set(item.symbol, item);
         }
-        article.append(group.kind === 'matrix' ? buildMatrix(group) : buildTable(group, i > 0));
+        article.append(group.kind === 'matrix' ? buildMatrix(group) : buildTable(group, i > 0, Boolean(section.ath)));
       });
       cards.append(article);
     }
@@ -474,20 +479,61 @@ function renderRow(tr) {
   tr.classList.toggle('is-up', cells[2].firstChild.classList.contains('up'));
   tr.classList.toggle('is-down', cells[2].firstChild.classList.contains('down'));
 
-  if (cells[7].classList.contains('c-ext')) {
+  const ext = $('td.c-ext', tr);
+  if (ext) {
     const after = afterView(item, q);
     const { text, dir } = signed(after?.pct, 2, '%');
-    const figure = $('.xp', cells[7]);
+    const figure = $('.xp', ext);
     figure.textContent = text;
     figure.className = `nm xp ${dir}`;
-    $('.xc', cells[7]).replaceChildren(...(after ? [el('span', { class: 'badge', text: after.tag }), timeLabel(after.time) ?? ''] : []));
-    cells[7].title = after
+    $('.xc', ext).replaceChildren(...(after ? [el('span', { class: 'badge', text: after.tag }), timeLabel(after.time) ?? ''] : []));
+    ext.title = after
       ? `Since the close, read from ${after.source}. Implies about ${fmt(after.level, q.dp)}.`
       : 'Shown once the exchange has closed and its future or ETF has traded since';
     $('.oh', cells[0]).replaceChildren(...(after ? ['Since close ', el('b', { class: dir, text: text }), ` · ${after.tag}`] : []));
   }
+  const ath = $('td.c-ath', tr);
+  if (ath) renderAth(ath, $('.oa', cells[0]), q);
   renderRange($('.range', tr), q);
-  renderLine($('.spark', tr), q, SPARK);
+}
+
+// How far a quote is below its all-time high and when that was set, with the
+// level on hover; at its high it says so instead, in green. Null for a quote
+// without one (yields, currencies, or before the long history has loaded).
+function athView(q) {
+  if (!q.ath) return null;
+  const below = (q.last / q.ath - 1) * 100;
+  const record = below > -0.005;
+  return {
+    text: record ? 'At ATH' : signed(below, 2, '%').text,
+    record,
+    when: setOn(q.athDate, q.date),
+    shortWhen: setOn(q.athDate, q.date, true),
+    title: `All-time high ${fmt(q.ath, q.dp)} on ${longDate(q.athDate)}. The price history goes back to ${monthOf(q.athFrom)}.`,
+  };
+}
+
+// A row's From ATH column, with when the high was set under the figure.
+function renderAth(cell, under, q) {
+  const ath = athView(q);
+  const figure = $('.ap', cell);
+  figure.textContent = ath?.text ?? '—';
+  figure.classList.toggle('up', Boolean(ath?.record));
+  $('.ad', cell).textContent = ath?.when ?? '';
+  cell.title = ath?.title ?? 'Shown once the long price history has loaded';
+  // On a card too narrow for the column, under the name.
+  under.replaceChildren(...(ath ? ['From ATH ', el('b', { class: ath.record ? 'up' : '', text: ath.text }), ` · ${ath.when}`] : []));
+}
+
+// When a high was set: "today", the day this year ("16 Oct"), or the month
+// of an earlier year ("Oct 2007"), or just its year (`short`, for the tiles).
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const monthOf = (iso) => `${MONTH_NAMES[Number(iso.slice(5, 7)) - 1]} ${iso.slice(0, 4)}`;
+const longDate = (iso) => `${Number(iso.slice(8, 10))} ${monthOf(iso)}`;
+function setOn(iso, session, short = false) {
+  if (iso === session) return 'today';
+  if (Number(iso.slice(0, 4)) === new Date().getFullYear()) return `${Number(iso.slice(8, 10))} ${MONTH_NAMES[Number(iso.slice(5, 7)) - 1]}`;
+  return short ? iso.slice(0, 4) : monthOf(iso);
 }
 
 // Places today's price on the bar between its 52-week low and high.
@@ -562,6 +608,12 @@ function renderTile(tile) {
   const moved = signed(after?.pct, 2, '%');
   $('.t-after', tile).replaceChildren(...(after ? ['Since close ', el('b', { class: moved.dir, text: moved.text })] : []));
   $('.t-after', tile).title = after ? `Read from ${after.source}` : '';
+  // When the high was set goes where the tile has room for it: the day this
+  // year, the year before that, and all of it on hover.
+  const ath = athView(q);
+  const line = $('.t-ath', tile);
+  line.replaceChildren(...(ath ? ['From ATH ', el('b', { class: ath.record ? 'up' : '', text: ath.text }), el('span', { class: 't-when', text: ` · ${ath.shortWhen}` })] : []));
+  line.title = ath?.title ?? '';
   renderLine($('.spark', tile), q, TILE_SPARK);
 }
 
@@ -693,12 +745,11 @@ function showMode(mode) {
 
 // Each table's column headers name the periods of the view.
 function labelColumns() {
-  const { periods, line } = MODES[state.mode];
+  const { periods } = MODES[state.mode];
   for (const label of document.querySelectorAll('thead [data-slot]')) {
     const bp = label.closest('table').classList.contains('yields') ? ' bp' : '';
     label.textContent = PERIOD_SHORT[periods[label.dataset.slot]] + bp;
   }
-  for (const label of document.querySelectorAll('thead .c-spark span')) label.textContent = PERIOD_NAME[line];
 }
 
 // The closing levels behind every change. On a cold start the server is
