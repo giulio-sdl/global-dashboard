@@ -415,10 +415,13 @@ h2 {
 h2::before { content: ""; flex: none; width: 15px; height: 15px; background: var(--accent); clip-path: polygon(45% 0, 100% 0, 55% 100%, 0 100%); }
 h2::after { content: ""; flex: 1; height: 1px; background: var(--grid); }
 
-/* Cards go side by side only when each gets 640px or more. The columns beside the names take up to 528px,
-   and the names want 112px or more, so a 1920px window shows two cards with every column, not three with
-   the names cut to a letter. A card still too narrow for all its columns drops some (see the end of this file). */
-.cards { columns: 640px; column-gap: 16px; }
+/* Cards go side by side only when each has 640px or more inside: the columns beside the names take up to
+   528px, and the names want 112px or more. That is 674px with a card's padding and border (2 × 16 + 2 × 1),
+   which is what the columns here measure, while the rules that drop a card's columns measure its inside.
+   So a 1920px window shows two cards with every column, not three with the names cut to a letter, and a
+   card never loses Since close just for sharing the row. A card still too narrow for all its columns drops
+   some (see the end of this file). */
+.cards { columns: 674px; column-gap: 16px; }
 
 .card {
   container-type: inline-size;
