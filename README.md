@@ -71,10 +71,15 @@ and every visitor's refreshes go to the data feeds through the one server.
   "Valuation measures" below). Both the search box and an index's panel open them.
 - **Search**: the box in the header finds any share, fund, index or future by its symbol or name, in any market
   the quote feed covers, and opens it in the company panel on five years. A company's name can be typed
-  loosely: "coca cola", "jp morgan", "procter and gamble" and "unicredit" find KO, JPM, PG and UCG-IT. The
-  symbol typed comes first, then companies whose name is the one typed or begins with the words typed (the
-  dashboard's index constituents, and US companies by their whole name, from the SEC's list), largest first,
-  then the rest of the quote feed's own lookup. Arrow keys and Enter pick a match; Enter with none highlighted
+  loosely or in full: "coca cola", "jp morgan", "procter and gamble" and "unicredit" find KO, JPM, PG and
+  UCG-IT, and "Merck KGaA" finds MRK-DE ahead of Merck & Co. An index constituent is also found by its ticker
+  at home, without the market's suffix (NESN, LONN and UCG find NESN-CH, LONN-CH and UCG-IT, which the quote
+  feed's lookup does not), and a share class can be typed with a dash, a slash or a space (BRK-B, BRK/B, BRK B).
+  The symbol typed comes first, with the constituents whose ticker it is, then companies whose name is the one
+  typed or begins with the words typed (the dashboard's index constituents, and US companies by their whole
+  name, from the SEC's list), largest first, then the rest of the quote feed's own lookup. A search made while
+  the constituents are still loading (just after the server starts) is not kept, so typing it again finds
+  them. Arrow keys and Enter pick a match; Enter with none highlighted
   opens the first, or the text as a symbol when nothing matches and it could be one. "/" anywhere on the page
   puts the cursor in the box. A company listed in several countries is offered once, in its home market (for an
   index constituent, the listing its index panel uses); type another listing's symbol (`AAPL-CH`) to get that

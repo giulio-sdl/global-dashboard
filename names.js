@@ -5,12 +5,13 @@
 // are compared with their words run together, "&" and "and" left out, and
 // without the legal form at the end.
 
-const SHORT_FORMS = { CORPORATION: 'CORP', INCORPORATED: 'INC', COMPANY: 'CO', LIMITED: 'LTD' };
+const SHORT_FORMS = { CORPORATION: 'CORP', INCORPORATED: 'INC', COMPANY: 'CO', LIMITED: 'LTD', AKTIENGESELLSCHAFT: 'AG' };
 
 // Words at the end of a name that say what kind of company it is, not which.
 const LEGAL_FORMS = new Set([
   'INC', 'CORP', 'CO', 'LTD', 'LLC', 'LP', 'PLC', 'SA', 'SPA', 'AG', 'SE', 'NV', 'BV', 'AB', 'ASA', 'AS', 'OYJ', 'KGAA',
   'SAB', 'DE', 'CV', 'HOLDING', 'HOLDINGS', 'GROUP',
+  'PUBL', 'ABP', // a Swedish or Finnish company's: "Boliden AB (publ)", "Nordea Bank Abp"
 ]);
 
 function words(name) {
@@ -55,4 +56,11 @@ export function nameMatch(parts, typed) {
   if (parts.core === typed) return 'name';
   if (parts.whole.startsWith(typed) && parts.ends.has(typed.length)) return 'start';
   return null;
+}
+
+// Whether a name begins with every word typed, its legal form included:
+// "merck kgaa" is Merck KGaA's name in full, and not Merck & Co's.
+export function typedInFull(parts, text) {
+  const typed = nameParts(text).whole;
+  return typed !== '' && parts.whole.startsWith(typed) && parts.ends.has(typed.length);
 }
